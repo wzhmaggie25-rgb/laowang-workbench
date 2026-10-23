@@ -26,31 +26,47 @@
 
 ## 安装（两种方式，自己选）
 
-### 方式 A：源码直引（推荐，先在源码版 DSH 上试）
+### 方式 A：源码直引（推荐，当前唯一能用的方式）
 
-**前提：插件目录必须放在 DSH 源码仓库里面。** 插件 import 的 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery` 是 peerDependencies，靠 DSH 仓库的 `node_modules` 解析。放在仓库外会直接 `ERR_MODULE_NOT_FOUND`（已实测），不是配置问题。
+**插件目录放哪里都行**，不要求塞进 DSH 源码仓库（已实测仓库外路径正常加载）。
+插件 import 的 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery` 由 DSH 运行时供给，不需要你在插件目录里装依赖。
 
-1. 把 `plugins/dsh-publish/` 拷到 `<DSH 源码仓库>/plugins/dsh-publish/`。
-2. 改 `cordis.patch.yml` 里的三个 `<占位符>` 为绝对路径，`name` 指向 `<DSH 源码仓库>/plugins/dsh-publish/src/index.ts`。
+只有一种情况会 `ERR_MODULE_NOT_FOUND`：**脱离 DSH 运行时**直接用 node/tsx 去 import `src/index.ts`（比如单独跑类型检查）。这不影响在 DSH 里加载。
+
+1. `git clone https://github.com/wzhmaggie25-rgb/laowang-workbench.git`，插件在 `plugins/dsh-publish/`。
+2. 改 `cordis.patch.yml` 里的三个 `<占位符>` 为绝对路径，`name` 指向 `<克隆目录>/plugins/dsh-publish/src/index.ts`。
 3. 临时试用（`--patch` 是**全局参数**，必须放在 `web` 之前）：
 
 ```sh
-# 在 DSH 源码仓库根目录
-pnpm run dsh --patch "<DSH 源码仓库>/plugins/dsh-publish/cordis.patch.yml" web
+# 在 DSH 源码仓库根目录执行（下面用 pnpm run dsh，等价于 node --import tsx/esm apps/cli/src/bin.ts）
+pnpm run dsh --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" web
 ```
 
 4. 长期生效：把那条 `insert` 合并进 `~/.dsh/profiles/<profile>/cordis.patch.yml`，**不要覆盖文件里已有的条目**（原文件通常只有注释和 `[]`）。
-5. 启动日志里不应出现 `did not activate`，也不应有模块解析报错；出现 `did not activate` 说明 `inject` 声明的服务在该 profile 里缺失。
+
+**怎么判断装成功还是失败**：启动日志里
+
+- 什么都不打印 → 插件已激活（成功是静默的）
+- 打印 `dsh: warning: 1 entry did not activate` + 一段堆栈 → 加载失败，堆栈里会写明是路径不存在、模块找不到，还是 `inject` 的服务缺失
 
 零副作用地先验一遍配置合成（不启动服务）：
 
 ```sh
-pnpm run dsh --profile web --dump-config | grep -A3 "id: publish"
+pnpm run dsh --profile web --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" --dump-config | grep -A3 "id: publish"
 ```
+
+> 源码直引加载的是 `.ts`，靠的是 DSH 源码版自带的 tsx。如果你用的是 npm 装的 dsh（没有 tsx），`.ts` 加载不了，得先编译成 JS —— 也就是下面的方式 B。
 
 ### 方式 B：`dsh plugin add`（当正式包分发时才用，当前还不成立）
 
-`package.json` 目前没有 `main`/`exports`，也没有编译产物，所以 `dsh plugin add` 装进去也 import 不到东西。要走路这条，先补 `main`/`exports` + 构建出 JS，再把 `insert` 的 `name` 换成包名。
+`dsh plugin` 本身不装东西，它只是把参数原样转发给 profile 目录里的 pnpm。所以从 GitHub 装长这样：
+
+```sh
+dsh plugin --profile web add "github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish"
+```
+
+**但现在跑不通**：`package.json` 没有 `main`/`exports`，也没有编译产物，pnpm 装完 DSH 找不到入口（会报 `Cannot find module ... /dist/index.js` 之类）。要走这条路，得先补 `main`/`exports` 并构建出 JS，再把 `insert` 的 `name` 换成包名 `dsh-plugin-publish`。
+
 
 ## 停用
 
