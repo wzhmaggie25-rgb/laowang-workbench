@@ -8,7 +8,7 @@
 
 ## 现在是什么状态
 
-**v0.1 骨架，未跑过真实发布。** 已通过：`tsc` 类型检查、模块导入烟测、台账与摘要烟测、DSH web profile 实际加载（零 warning）。
+**v0.1 骨架，未跑过真实发布。** 已通过：`tsc` 类型检查、模块导入烟测、台账与摘要烟测、DSH web profile 实际加载（`.ts` 源码直引和 `dist/index.js` 打包产物两种形态都零 warning）、pnpm 10 从本仓库 GitHub 链接安装。
 **没有验证过**：连真实 18060、跑真实 `sau upload-*`、审批弹窗与后台任务完成通知的实际表现。
 
 先按这份文档自己装、自己测；不要把它当成"已经能发内容"的东西。
@@ -26,7 +26,39 @@
 
 ## 安装（两种方式，自己选）
 
-### 方式 A：源码直引（推荐，当前唯一能用的方式）
+### 方式 A：GitHub 链接安装（一条命令，npm 版 dsh 和源码版都能用）
+
+`dsh plugin` 本身不装东西，它只是把参数原样转发给 profile 目录里的 pnpm。装法：
+
+```sh
+dsh plugin --profile web add "github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish"
+```
+
+装完后 `~/.dsh/profiles/web/node_modules/dsh-plugin-publish/dist/index.js` 就是插件本体。然后在 `~/.dsh/profiles/web/cordis.patch.yml` 里加一条 `insert`（**不要覆盖文件里已有的条目**，原文件通常只有注释和 `[]`）：
+
+```yaml
+- insert:
+    - id: publish
+      name: 'C:/Users/<你>/.dsh/profiles/web/node_modules/dsh-plugin-publish/dist/index.js'
+      config:
+        accounts:
+          - platform: xiaohongshu
+            name: default
+        sauBin: '<social-auto-upload 仓库>/.venv/Scripts/sau.exe'
+        sauCwd: '<social-auto-upload 仓库>'
+        xhsBaseUrl: 'http://127.0.0.1:18060'
+```
+
+实测情况（pnpm 10.34）：
+
+- **已实测通过**：GitHub 链接拉包安装（8 秒装完）；`dist/index.js` 在 DSH web profile 里加载零 warning。
+- **未实测**：`name` 直接写裸包名 `dsh-plugin-publish` 的解析。理论可行，但没试过 —— 如果写包名出现 `did not activate`，换成上面这种**绝对路径指向 dist**，100% 能导。
+
+`dist/index.js` 是提交进仓库的 esbuild 打包产物（`@deepseek-ai/*` 保持外部导入，由 DSH 运行时供给），所以**装的时候不需要构建**。想自己重新打包：把插件目录放进 DSH 源码仓库里，`pnpm i && pnpm build`。
+
+升级插件：`dsh plugin --profile web update dsh-plugin-publish`（转发给 pnpm），或删掉重 add。
+
+### 方式 B：源码直引（不装包，直接指向 .ts）
 
 **插件目录放哪里都行**，不要求塞进 DSH 源码仓库（已实测仓库外路径正常加载）。
 插件 import 的 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery` 由 DSH 运行时供给，不需要你在插件目录里装依赖。
@@ -55,17 +87,7 @@ pnpm run dsh --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" web
 pnpm run dsh --profile web --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" --dump-config | grep -A3 "id: publish"
 ```
 
-> 源码直引加载的是 `.ts`，靠的是 DSH 源码版自带的 tsx。如果你用的是 npm 装的 dsh（没有 tsx），`.ts` 加载不了，得先编译成 JS —— 也就是下面的方式 B。
-
-### 方式 B：`dsh plugin add`（当正式包分发时才用，当前还不成立）
-
-`dsh plugin` 本身不装东西，它只是把参数原样转发给 profile 目录里的 pnpm。所以从 GitHub 装长这样：
-
-```sh
-dsh plugin --profile web add "github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish"
-```
-
-**但现在跑不通**：`package.json` 没有 `main`/`exports`，也没有编译产物，pnpm 装完 DSH 找不到入口（会报 `Cannot find module ... /dist/index.js` 之类）。要走这条路，得先补 `main`/`exports` 并构建出 JS，再把 `insert` 的 `name` 换成包名 `dsh-plugin-publish`。
+> 方式 B 加载的是 `.ts`，靠的是 DSH 源码版自带的 tsx。npm 装的 dsh 没有 tsx，请用方式 A。
 
 
 ## 停用
@@ -153,6 +175,7 @@ tsx "plugins/dsh-publish/tests/smoke.ts"
 
 ```text
 plugins/dsh-publish/
+├── dist/index.js         esbuild 打包产物（提交进仓库，链接安装的入口）
 ├── src/
 │   ├── index.ts          插件入口：注册 4 个工具、审批门禁、任务入队
 │   ├── platforms.ts      平台能力表（adapter / 命令名 / 能力等级）
