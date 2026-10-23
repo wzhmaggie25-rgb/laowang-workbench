@@ -10,12 +10,25 @@
     "url": "https://github.com/wzhmaggie25-rgb/laowang-workbench.git",
     "directory": "plugins/dsh-publish"
   },
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "tests",
+    "README.md",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --external:@deepseek-ai/* --outfile=dist/index.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
   "engines": {
     "dsh": ">=0.2.1-rc.2"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/schemastery": "*"
   }
 }
