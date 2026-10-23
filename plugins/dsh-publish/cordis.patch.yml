@@ -1,0 +1,21 @@
+# 发布端插件 overlay 示例。把下面的 <占位符> 换成本机绝对路径再用。
+#
+# 临时试用（--patch 是全局参数，必须放在 web 之前）：
+#   pnpm run dsh --patch "<本插件目录>/cordis.patch.yml" web
+#
+# 长期生效：把这条 insert 合并进 ~/.dsh/profiles/<profile>/cordis.patch.yml，
+# 不要覆盖文件里已有的条目（原文件通常是注释 + []）。
+- insert:
+    - id: publish
+      name: '<本插件目录>/src/index.ts'
+      config:
+        # account 名即 sau 的 --account，登录时用同一个名字
+        accounts:
+          - platform: xiaohongshu
+            name: default
+          - platform: douyin
+            name: default
+        # 上游默认值一律不在这里覆盖；要偏离就在具体调用里显式传参。
+        sauBin: '<social-auto-upload 仓库>/.venv/Scripts/sau.exe'
+        sauCwd: '<social-auto-upload 仓库>'
+        xhsBaseUrl: 'http://127.0.0.1:18060'

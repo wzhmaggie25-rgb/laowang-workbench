@@ -1,0 +1,21 @@
+{
+  "name": "dsh-plugin-publish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek Harness 发布端插件：唯一发布入口、人工审批门禁、回执台账",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wzhmaggie25-rgb/laowang-workbench.git",
+    "directory": "plugins/dsh-publish"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  }
+}
