@@ -25,7 +25,7 @@ export interface SauUploadInput {
 
 export interface SauUploadResult {
   ok: boolean
-  status: 'published' | 'scheduled' | 'unknown' | 'failed'
+  status: 'submitted' | 'published' | 'scheduled' | 'unknown' | 'failed'
   detail: string
   stdoutTail: string
 }
@@ -39,7 +39,8 @@ interface RunResult {
 
 const MAX_CAPTURE = 20_000
 
-function run(bin: string, args: readonly string[], options: SauOptions): Promise<RunResult> {
+function run(bin: string, args: readonly string[], options: SauOptions, signal?: AbortSignal): Promise<RunResult> {
+  signal?.throwIfAborted()
   return new Promise((resolve, reject) => {
     const child = spawn(bin, [...args], {
       cwd: options.cwd ?? process.cwd(),
@@ -54,6 +55,8 @@ function run(bin: string, args: readonly string[], options: SauOptions): Promise
       timedOut = true
       child.kill()
     }, options.timeoutMs)
+    const abort = () => { timedOut = true; child.kill() }
+    signal?.addEventListener('abort', abort, { once: true })
 
     child.stdout.on('data', (chunk: Buffer) => {
       if (stdout.length < MAX_CAPTURE) stdout += chunk.toString('utf8')
@@ -62,10 +65,12 @@ function run(bin: string, args: readonly string[], options: SauOptions): Promise
       if (stderr.length < MAX_CAPTURE) stderr += chunk.toString('utf8')
     })
     child.on('error', error => {
+      signal?.removeEventListener('abort', abort)
       clearTimeout(timer)
       reject(error)
     })
     child.on('close', code => {
+      signal?.removeEventListener('abort', abort)
       clearTimeout(timer)
       resolve({ code, stdout, stderr, timedOut })
     })
@@ -103,7 +108,7 @@ export class SauAdapter {
     }
   }
 
-  async upload(input: SauUploadInput): Promise<SauUploadResult> {
+  async upload(input: SauUploadInput, signal?: AbortSignal): Promise<SauUploadResult> {
     const args = this.base(input.sauName, subcommand(input.kind), input.account)
     if (input.kind === 'article') {
       args.push('--title', input.title)
@@ -124,7 +129,7 @@ export class SauAdapter {
     // 只在显式要求有头时传 --headed；默认一律不传，交给上游 headless 默认。
     if (input.headed === true) args.push('--headed')
 
-    const result = await run(this.options.bin, args, this.options)
+    const result = await run(this.options.bin, args, this.options, signal)
     const tail = result.stdout.slice(-2000)
     const joined = `${result.stdout}\n${result.stderr}`
 
@@ -132,13 +137,13 @@ export class SauAdapter {
       return { ok: false, status: 'unknown', detail: '命令超时：提交结果未确认，先查平台原记录', stdoutTail: tail }
     }
     if (result.code !== 0) {
-      return { ok: false, status: 'failed', detail: `退出码 ${result.code ?? 'null'}：${firstLine(result.stderr) || firstLine(result.stdout) || '无输出'}`, stdoutTail: tail }
+      return { ok: false, status: 'unknown', detail: `退出码 ${result.code ?? 'null'}：${firstLine(result.stderr) || firstLine(result.stdout) || '无输出'}；提交结果待核实`, stdoutTail: tail }
     }
     if (input.scheduleAt !== undefined) {
-      return { ok: true, status: 'scheduled', detail: '已提交定时发布（上游未提供机器可读回执，按命令成功判定）', stdoutTail: tail }
+      return { ok: true, status: 'submitted', detail: '已请求定时发布，尚待平台核实', stdoutTail: tail }
     }
     if (/成功|发布完成|已发布|published|success/i.test(joined)) {
-      return { ok: true, status: 'published', detail: firstLine(result.stdout) || '已发布（按上游输出文本判定）', stdoutTail: tail }
+      return { ok: true, status: 'submitted', detail: firstLine(result.stdout) || '已提交，尚待平台核实', stdoutTail: tail }
     }
     return { ok: false, status: 'unknown', detail: '命令成功但无可核对的发布证据，先查平台原记录', stdoutTail: tail }
   }

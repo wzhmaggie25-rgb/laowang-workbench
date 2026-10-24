@@ -8,13 +8,28 @@
 
 ## 现在是什么状态
 
-**v0.1 骨架，未跑过真实发布。** 已通过：`tsc` 类型检查、模块导入烟测、台账与摘要烟测、DSH web profile 实际加载（`.ts` 源码直引和 `dist/index.js` 打包产物两种形态都零 warning）、pnpm 从本仓库 GitHub 链接安装、裸包名经 `exports` 解析到 `dist/index.js`。
+**v0.2：在 v0.1 的 4 个聊天工具之外，补上了「发布中心」可视化页面、与真实参数对应的设置页和侧栏入口开关。** 页面与聊天工具共用同一套预检、确认、台账与配额逻辑（`src/runtime.ts`）。
 
-本包现已声明 `dsh.bundle.patch`。此前缺失该字段会让 `dsh plugin add` 判定 `not-bundle` 并回滚安装，即报错「这个包没有声明组合包，不能作为插件管理」。**这一项尚未在真实 dsh 插件管理器里端到端复验**，装成功与否以启动日志静默为准。
+已通过：
 
-**没有验证过**：连真实 18060、跑真实 `sau upload-*`、审批弹窗与后台任务完成通知的实际表现。
+- Host / Client 类型检查与打包（对 DSH `0.2.1-rc.2` 的构建声明）。
+- 10 项离线行为测试（`node scripts/test.mjs`）：并发防重、确认后内容变化拒发、取消后不执行、断连记 unknown、暂停拒新计划、每日配额并发准入、unknown/已提交占配额、跨日不计、v0.1 台账迁移。
+- 真实测试 Host（隔离 DSH_HOME）浏览器端到端：发布中心激活、账号数据经页面通道读取、侧栏隐藏/恢复、设置保存后刷新保留、账号增改同步、420px 窄窗不溢出。
 
-先按这份文档自己装、自己测；不要把它当成"已经能发内容"的东西。
+**仍然没有验证过**：连真实 18060、跑真实 `sau upload-*`、真实发布闭环。这些需要明确授权后另行受控验收。
+
+## 发布中心
+
+侧栏「发布中心」入口，四个标签：
+
+- **新建发布**：选平台/账号/内容类型，填标题、正文、标签，选媒体或填本机绝对路径，可选定时；预检生成 `prepareId` 与内容摘要后进入最终确认，显式确认才提交。修改任何字段后旧确认失效。
+- **发布记录**：按台账逐条显示状态。`已提交 · 待核实` 不等于已公开；`结果待核实` 必须先查平台原记录，禁止直接重发。
+- **账号**：维护平台与账号别名（即 sau 的 `--account`），保存后可检查上游登录态。扫码登录仍由上游本地工具完成。
+- **设置**：入口开关、启用发布、上传引擎连接、审批行为、每日配额、超时与媒体上限，对应下方配置表；保存写入 DSH 原生设置（`publish` 命名空间）。
+
+「在侧栏显示发布中心」只隐藏导航入口，插件管理页里的设置卡片始终保留，可从那里恢复入口。整插件启停仍走 DSH 插件管理。
+
+页面与聊天工具走同一业务层：页面的显式确认和聊天工具的 `allowed-once` 审批都先过 `runtime.submit` 的同一道防重、摘要复核与配额准入。
 
 ## 前置：两个上游先装好
 
@@ -120,23 +135,32 @@ pnpm run dsh --profile <profile> --dump-config | grep -c "id: publish"   # 应�
 
 ## 配置
 
-默认值全部来自 `src/defaults.ts`，本包 `cordis.patch.yml` 只带 `accounts`。要改任何一项，写到 `~/.dsh/profiles/<profile>/cordis.patch.yml`（组合包之后应用，同名以它为准），**不要改包里的文件** —— 一升级就被冲掉。
+默认值全部来自 `src/defaults.ts`，本包 `cordis.patch.yml` 只带 `accounts`。v0.2 起这些字段多数可以直接在发布中心「设置」页改（写入 DSH 原生设置）；写在 profile patch 里的值仍然生效且优先。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `accounts` | `[]` | `{ platform, name }`，`name` 即 sau 的 `--account`，登录时用同一个名字 |
 | `xhsBaseUrl` | `http://127.0.0.1:18060` | 上游默认端口 |
-| `xhsToken` | — | 上游启用 `AUTH_TOKEN` 才需要 |
+| `xhsToken` | — | 上游启用 `AUTH_TOKEN` 才需要；保存后不回显 |
 | `sauBin` | `sau` | 不在 PATH 上就写 venv 里的绝对路径 |
 | `sauCwd` | — | social-auto-upload 仓库根目录 |
-| `ledgerPath` | `~/.dsh/publish/ledger.json` | 台账位置 |
-| `requireApproval` | `true` | 发布前必须人工确认（fail-closed） |
-| `approvalTimeoutSec` | `300` | 超时按拒绝处理 |
-| `dailyLimit` | `0` | 0 = 不限 |
+| `ledgerPath` | `<DSH_HOME>/publish/ledger.json` | 台账位置；见下方升级说明 |
+| `requireApproval` | `true` | 聊天工具提交前人工确认（fail-closed）；页面始终要最终确认 |
+| `approvalTimeoutSec` | `300` | 确认有效期，超时按拒绝处理 |
+| `dailyLimit` | `0` | 0 = 不限；已提交与待核实都占额 |
+| `dailyTimeZone` | `Asia/Shanghai` | 每日配额的时区 |
 | `allowedPlatforms` / `allowedAccounts` | `[]` | 空 = 不限 |
 | `headed` | `false` | true 才给 sau 传 `--headed` |
 | `httpTimeoutMs` | `180000` | 小红书 HTTP 超时 |
 | `publishTimeoutMs` | `900000` | sau 命令超时 |
+| `showSidebar` | `true` | 侧栏入口开关（仅发布中心设置页与插件设置卡片可改） |
+| `publishingEnabled` | `true` | false 时页面禁提交、Host 拒新计划，查看记录不受影响 |
+| `maxMediaBytes` | `536870912` | 页面上传单文件上限；超限文件不留残片 |
+
+### 从 v0.1 升级
+
+- **台账默认位置变了**：v0.1 是 `~/.dsh/publish/ledger.json`，v0.2 改为 `<DSH_HOME>/publish/ledger.json`（未设 `DSH_HOME` 时两者相同，无需迁移）。首次启动时若新位置还没有台账而旧位置有，插件会把旧记录并入新台账后继续写新位置；**旧文件保持原样不删不改**，作为可回退证据。旧文件损坏时插件拒绝启动并指明路径，不会静默丢历史。
+- 新增 `dailyTimeZone`、`showSidebar`、`publishingEnabled`、`maxMediaBytes` 字段；`publish_submit` 的工具超时改为覆盖确认有效期上限（配置的确认窗口由 execute 内的取消信号精确收口）。
 
 ## 工具面（固定 4 个，加平台不加工具）
 
@@ -197,18 +221,32 @@ tsx "plugins/dsh-publish/tests/smoke.ts"
 
 ```text
 plugins/dsh-publish/
-├── dist/index.js         esbuild 打包产物（提交进仓库，链接安装的入口）
+├── dist/index.js         esbuild Host 打包产物（提交进仓库，链接安装的入口）
+├── dist/client.js        发布中心 Client 打包产物（lazy-CJS 模块）
 ├── src/
-│   ├── index.ts          插件入口：注册 4 个工具、审批门禁、任务入队
+│   ├── index.ts          插件入口：注册 4 个工具、页面通道、jobs controller
+│   ├── api.ts            页面 RPC（/api 精确路由）与流式媒体上传
+│   ├── contract.ts       页面协议入参校验
+│   ├── runtime.ts        预检/确认/防重/串行/配额的共享业务层
+│   ├── config.ts         设置 Schema（DSH 原生 ConfigForms）
 │   ├── platforms.ts      平台能力表（adapter / 命令名 / 能力等级）
 │   ├── adapters/xhs.ts   小红书 HTTP 适配器
 │   ├── adapters/sau.ts   sau CLI 适配器
-│   ├── ledger.ts         回执台账
+│   ├── ledger.ts         回执台账（含 v0.1 台账迁移）
 │   ├── digest.ts         内容摘要与幂等键
 │   ├── defaults.ts       上游默认值事实表
-│   └── types.ts
-├── scripts/doctor.ts     只读诊断
-├── scripts/login-all.bat 一键扫码
-├── tests/smoke.ts        纯逻辑烟测
+│   ├── types.ts
+│   └── client/           发布中心页面、设置卡片、侧栏图标与文案
+├── scripts/
+│   ├── build.mjs         Host + Client 打包
+│   ├── typecheck.mjs     对 DSH 构建声明的类型检查
+│   ├── test.mjs          离线行为测试
+│   ├── doctor.ts         只读诊断
+│   └── login-all.bat     一键扫码
+├── tests/
+│   ├── runtime.test.mjs  10 项隔离行为测试
+│   ├── browser-smoke.mjs 真实 Host 浏览器端到端（隔离 DSH_HOME）
+│   └── smoke.ts          纯逻辑烟测
+├── docs/QODER-HANDOFF-20261024.md  交接与实施顺序记录
 └── cordis.patch.yml      组合包自带 overlay（装完自动接线）
 ```

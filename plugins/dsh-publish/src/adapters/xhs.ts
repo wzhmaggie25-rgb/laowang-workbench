@@ -46,16 +46,16 @@ export class XhsAdapter {
     return `${this.options.baseUrl.replace(/\/+$/, '')}${path}`
   }
 
-  private async call(path: string, init?: RequestInit): Promise<{ status: number; text: string; json?: unknown }> {
+  private async call(path: string, init?: RequestInit, signal?: AbortSignal): Promise<{ status: number; text: string; json?: unknown }> {
     const response = await fetch(this.url(path), {
       ...init,
       headers: { ...this.headers(), ...(init?.headers as Record<string, string> | undefined) },
-      signal: AbortSignal.timeout(this.options.timeoutMs),
+      signal: AbortSignal.any([AbortSignal.timeout(this.options.timeoutMs), ...(signal ? [signal] : [])]),
     })
     const text = await response.text()
     let json: unknown
     try {
-      json = JSON.parse(text) as unknown
+      json = JSON.parse(text)
     } catch {
       json = undefined
     }
@@ -76,13 +76,15 @@ export class XhsAdapter {
     try {
       const result = await this.call('/api/v1/login/status')
       const message = extractMessage(result.json) ?? result.text.slice(0, 200)
-      return { loggedIn: result.status < 300 && /登录|logged|success|true/i.test(result.text), detail: message }
+      const record = typeof result.json === 'object' && result.json !== null ? result.json as Record<string, unknown> : {}
+      const data = typeof record.data === 'object' && record.data !== null ? record.data as Record<string, unknown> : {}
+      return { loggedIn: result.status < 300 && record.success === true && data.is_logged_in === true, detail: message }
     } catch (error) {
       return { loggedIn: false, detail: `服务不可达：${(error as Error).message}` }
     }
   }
 
-  async publish(input: XhsPublishInput): Promise<XhsPublishResult> {
+  async publish(input: XhsPublishInput, signal?: AbortSignal): Promise<XhsPublishResult> {
     const path = input.kind === 'video' ? '/api/v1/publish_video' : '/api/v1/publish'
     const payload: Record<string, unknown> = {
       title: input.title,
@@ -94,7 +96,7 @@ export class XhsAdapter {
       ...(input.isOriginal === undefined ? {} : { is_original: input.isOriginal }),
       ...(input.scheduleAt === undefined ? {} : { schedule_at: input.scheduleAt }),
     }
-    const result = await this.call(path, { method: 'POST', body: JSON.stringify(payload) })
+    const result = await this.call(path, { method: 'POST', body: JSON.stringify(payload) }, signal)
     const ok = result.status < 300 && readSuccess(result.json)
     return {
       ok,

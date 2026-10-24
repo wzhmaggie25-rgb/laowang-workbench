@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import type { LedgerEntry, PublishStatus } from './types'
 
 interface LedgerFile {
@@ -80,6 +81,34 @@ export class Ledger {
   }
 
   /**
+   * 一次性并入 v0.1 默认位置的台账（仅当新台账文件还不存在时）。
+   * 旧文件保持原样，作为可回退证据；损坏的旧文件按配置错误报错，不静默丢弃历史。
+   */
+  async adoptLegacy(legacyFile: string): Promise<number> {
+    if (resolve(legacyFile) === resolve(this.file)) return 0
+    if (existsSync(this.file)) return 0
+    let legacy: LedgerFile
+    try {
+      legacy = JSON.parse(await readFile(legacyFile, 'utf8')) as LedgerFile
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0
+      throw new Error(`旧发布台账无法读取（${legacyFile}）：${(error as Error).message}；请先人工处理该文件再启动插件`)
+    }
+    if (legacy.version !== 1 || !Array.isArray(legacy.entries)) {
+      throw new Error(`旧发布台账格式不认（${legacyFile}）；请先人工处理该文件再启动插件`)
+    }
+    const data = await this.load()
+    let adopted = 0
+    for (const entry of legacy.entries) {
+      if (!isLedgerEntry(entry) || data.entries.some(row => row.key === entry.key)) continue
+      data.entries.push({ ...entry, deviations: Array.isArray(entry.deviations) ? entry.deviations : [] })
+      adopted += 1
+    }
+    if (adopted > 0) await this.persist()
+    return adopted
+  }
+
+  /**
    * 启动时把停在 submitting 的行改判 unknown。
    * 进程可能死在「已点发布」和「拿到回执」之间，此时只能人工核，不能重发。
    */
@@ -97,4 +126,16 @@ export class Ledger {
     if (changed > 0) await this.persist()
     return changed
   }
+}
+
+/** v0.1 起共同的核心字段；旧记录缺的只有 v0.2 新增的可选字段。 */
+function isLedgerEntry(value: unknown): value is LedgerEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.key === 'string' && entry.key.length > 0
+    && typeof entry.prepareId === 'string' && entry.prepareId.length > 0
+    && typeof entry.digest === 'string' && entry.digest.length > 0
+    && typeof entry.request === 'object' && entry.request !== null
+    && typeof entry.status === 'string'
+    && typeof entry.createdAt === 'string' && typeof entry.updatedAt === 'string'
 }
