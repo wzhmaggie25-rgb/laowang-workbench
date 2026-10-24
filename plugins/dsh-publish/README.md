@@ -8,7 +8,10 @@
 
 ## 现在是什么状态
 
-**v0.1 骨架，未跑过真实发布。** 已通过：`tsc` 类型检查、模块导入烟测、台账与摘要烟测、DSH web profile 实际加载（`.ts` 源码直引和 `dist/index.js` 打包产物两种形态都零 warning）、pnpm 10 从本仓库 GitHub 链接安装。
+**v0.1 骨架，未跑过真实发布。** 已通过：`tsc` 类型检查、模块导入烟测、台账与摘要烟测、DSH web profile 实际加载（`.ts` 源码直引和 `dist/index.js` 打包产物两种形态都零 warning）、pnpm 从本仓库 GitHub 链接安装、裸包名经 `exports` 解析到 `dist/index.js`。
+
+本包现已声明 `dsh.bundle.patch`。此前缺失该字段会让 `dsh plugin add` 判定 `not-bundle` 并回滚安装，即报错「这个包没有声明组合包，不能作为插件管理」。**这一项尚未在真实 dsh 插件管理器里端到端复验**，装成功与否以启动日志静默为准。
+
 **没有验证过**：连真实 18060、跑真实 `sau upload-*`、审批弹窗与后台任务完成通知的实际表现。
 
 先按这份文档自己装、自己测；不要把它当成"已经能发内容"的东西。
@@ -24,57 +27,64 @@
 
 `sau` 可以跨目录调用（editable 安装会把仓库根挂进 `sys.path`），所以插件配置里直接写 venv 的 `sau.exe` 绝对路径，不必改 PATH。
 
-## 安装（两种方式，自己选）
+## 安装
 
-### 方式 A：GitHub 链接安装（一条命令，npm 版 dsh 和源码版都能用）
+### 方式 A：GitHub 链接安装（推荐，一条命令装完即接线）
 
-`dsh plugin` 本身不装东西，它只是把参数原样转发给 profile 目录里的 pnpm。装法：
+本包在 `package.json` 里声明了 `dsh.bundle.patch` 指向本文件，所以 **`dsh plugin add` 会自动加载这层 overlay 完成接线，不需要再手动往 profile 里写 `insert`**。
 
 ```sh
-dsh plugin --profile web add "github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish"
+dsh plugin --profile <profile> add github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish
 ```
 
-装完后 `~/.dsh/profiles/web/node_modules/dsh-plugin-publish/dist/index.js` 就是插件本体。然后在 `~/.dsh/profiles/web/cordis.patch.yml` 里加一条 `insert`（**不要覆盖文件里已有的条目**，原文件通常只有注释和 `[]`）：
+`dsh plugin` 本身不装东西，它只把参数原样转发给 profile 目录里的 pnpm。命令行里给地址加引号无所谓（shell 会吃掉），但**在桌面版「添加插件」对话框里绝不能带引号** —— 那个框只接收 `dsh plugin add` 之后的那一段，多一个 `"` 会报 `Path "/plugins/dsh-publish"" is not a directory`。
+
+对话框里的「安装源」保持默认或选 npm 官方源，**不要选「自定义地址」**：GitHub 地址和 `.tgz` 直链根本不经过安装源，选自定义只会多出一个必须填 `http(s)://` 的框。
+
+profile 用哪个取决于你的入口：桌面版是 `desktop`，`dsh web` 是 `web`。
+
+> 走 `--profile desktop` 前，桌面版必须已经启动过一次（初始化 profile），并且**运行时完全退出**再执行安装。
+
+**机器专属配置怎么给**：本文件只带与机器无关的 `accounts`，其余字段全部走 `src/defaults.ts` 的上游默认值。要覆盖 `sauBin`、`sauCwd`、`xhsBaseUrl`，在你自己的 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里追加同名条目 —— profile 那一层在所有组合包**之后**应用，同名 config 字段以它为准（**不要覆盖文件里已有的条目**，原文件通常只有注释和 `[]`）：
 
 ```yaml
-- insert:
-    - id: publish
-      name: 'C:/Users/<你>/.dsh/profiles/web/node_modules/dsh-plugin-publish/dist/index.js'
-      config:
-        accounts:
-          - platform: xiaohongshu
-            name: default
-        sauBin: '<social-auto-upload 仓库>/.venv/Scripts/sau.exe'
-        sauCwd: '<social-auto-upload 仓库>'
-        xhsBaseUrl: 'http://127.0.0.1:18060'
+- id: publish
+  config:
+    sauBin: 'D:/social-auto-upload/.venv/Scripts/sau.exe'
+    sauCwd: 'D:/social-auto-upload'
 ```
 
-实测情况（pnpm 10.34）：
+实测情况（pnpm 10.34 / 11.28.5）：
 
-- **已实测通过**：GitHub 链接拉包安装（8 秒装完）；`dist/index.js` 在 DSH web profile 里加载零 warning。
-- **未实测**：`name` 直接写裸包名 `dsh-plugin-publish` 的解析。理论可行，但没试过 —— 如果写包名出现 `did not activate`，换成上面这种**绝对路径指向 dist**，100% 能导。
+- **已实测通过**：GitHub 链接拉包安装（3.6–5.2 秒）；`name` 写裸包名 `dsh-plugin-publish` 经 `exports` 解析到 `dist/index.js` 成功。
+- 升级：`dsh plugin --profile <profile> update dsh-plugin-publish`（转发给 pnpm），或删掉重 add。
 
 `dist/index.js` 是提交进仓库的 esbuild 打包产物（`@deepseek-ai/*` 保持外部导入，由 DSH 运行时供给），所以**装的时候不需要构建**。想自己重新打包：把插件目录放进 DSH 源码仓库里，`pnpm i && pnpm build`。
 
-升级插件：`dsh plugin --profile web update dsh-plugin-publish`（转发给 pnpm），或删掉重 add。
-
-### 方式 B：源码直引（不装包，直接指向 .ts）
+### 方式 B：源码直引（开发用，改完不用重新打包）
 
 **插件目录放哪里都行**，不要求塞进 DSH 源码仓库（已实测仓库外路径正常加载）。
 插件 import 的 `@deepseek-ai/cordis`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/schemastery` 由 DSH 运行时供给，不需要你在插件目录里装依赖。
 
 只有一种情况会 `ERR_MODULE_NOT_FOUND`：**脱离 DSH 运行时**直接用 node/tsx 去 import `src/index.ts`（比如单独跑类型检查）。这不影响在 DSH 里加载。
 
+注意本包的 `cordis.patch.yml` 是给方式 A 自动接线用的（`name` 写的是包名，解析到 `dist/index.js`）。源码直引要自己写一条 `insert`，把 `name` 指到 `.ts` 的**绝对路径**：
+
+```yaml
+- insert:
+    - id: publish
+      name: '<克隆目录>/plugins/dsh-publish/src/index.ts'
+```
+
 1. `git clone https://github.com/wzhmaggie25-rgb/laowang-workbench.git`，插件在 `plugins/dsh-publish/`。
-2. 改 `cordis.patch.yml` 里的三个 `<占位符>` 为绝对路径，`name` 指向 `<克隆目录>/plugins/dsh-publish/src/index.ts`。
-3. 临时试用（`--patch` 是**全局参数**，必须放在 `web` 之前）：
+2. 临时试用（`--patch` 是**全局参数**，必须放在子命令之前）：
 
 ```sh
 # 在 DSH 源码仓库根目录执行（下面用 pnpm run dsh，等价于 node --import tsx/esm apps/cli/src/bin.ts）
-pnpm run dsh --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" web
+pnpm run dsh --patch "<你自己的 patch 文件>" web
 ```
 
-4. 长期生效：把那条 `insert` 合并进 `~/.dsh/profiles/<profile>/cordis.patch.yml`，**不要覆盖文件里已有的条目**（原文件通常只有注释和 `[]`）。
+3. 长期生效：把那条 `insert` 合并进 `~/.dsh/profiles/<profile>/cordis.patch.yml`，**不要覆盖文件里已有的条目**。
 
 **怎么判断装成功还是失败**：启动日志里
 
@@ -84,7 +94,7 @@ pnpm run dsh --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" web
 零副作用地先验一遍配置合成（不启动服务）：
 
 ```sh
-pnpm run dsh --profile web --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" --dump-config | grep -A3 "id: publish"
+pnpm run dsh --profile web --patch "<你自己的 patch 文件>" --dump-config | grep -A3 "id: publish"
 ```
 
 > 方式 B 加载的是 `.ts`，靠的是 DSH 源码版自带的 tsx。npm 装的 dsh 没有 tsx，请用方式 A。
@@ -92,20 +102,32 @@ pnpm run dsh --profile web --patch "<克隆目录>/plugins/dsh-publish/cordis.pa
 
 ## 停用
 
-把 profile patch 里那段 `- insert:` 整块注释掉或删掉即可；插件目录留着不影响。改完记得确认：
+接线是跟着包走的，所以停用就是卸载包 —— 那条 `insert` 在包自带的 `cordis.patch.yml` 里，包没了这层 overlay 自然消失：
 
 ```sh
-pnpm run dsh --profile web --dump-config | grep -c "id: publish"   # 应为 0
+dsh plugin --profile <profile> remove dsh-plugin-publish
 ```
 
+方式 B（源码直引）没有装包，改回原来那样：把 profile patch 里那段 `- insert:` 整块注释掉或删掉即可，插件目录留着不影响。
+
+两种都确认一下：
+
+```sh
+pnpm run dsh --profile <profile> --dump-config | grep -c "id: publish"   # 应为 0
+```
+
+> 如果你曾在 profile patch 里覆盖过 `publish` 的 config，那些条目本身不会报错，但插件已不在，留着没有作用，建议一并清掉。
+
 ## 配置
+
+默认值全部来自 `src/defaults.ts`，本包 `cordis.patch.yml` 只带 `accounts`。要改任何一项，写到 `~/.dsh/profiles/<profile>/cordis.patch.yml`（组合包之后应用，同名以它为准），**不要改包里的文件** —— 一升级就被冲掉。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `accounts` | `[]` | `{ platform, name }`，`name` 即 sau 的 `--account`，登录时用同一个名字 |
 | `xhsBaseUrl` | `http://127.0.0.1:18060` | 上游默认端口 |
 | `xhsToken` | — | 上游启用 `AUTH_TOKEN` 才需要 |
-| `sauBin` | `sau` | 建议写 venv 里的绝对路径 |
+| `sauBin` | `sau` | 不在 PATH 上就写 venv 里的绝对路径 |
 | `sauCwd` | — | social-auto-upload 仓库根目录 |
 | `ledgerPath` | `~/.dsh/publish/ledger.json` | 台账位置 |
 | `requireApproval` | `true` | 发布前必须人工确认（fail-closed） |
@@ -188,5 +210,5 @@ plugins/dsh-publish/
 ├── scripts/doctor.ts     只读诊断
 ├── scripts/login-all.bat 一键扫码
 ├── tests/smoke.ts        纯逻辑烟测
-└── cordis.patch.yml      overlay 示例
+└── cordis.patch.yml      组合包自带 overlay（装完自动接线）
 ```

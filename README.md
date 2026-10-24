@@ -20,7 +20,7 @@ DeepSeek Harness源码部署是本仓库的第一个Skill，整理了本次实�
 
 插件按Cordis协议写（`name`/`inject`/`apply`），注册4个工具：`publish_accounts`、`publish_prepare`、`publish_submit`、`publish_status`。加平台只加适配器，不加工具。
 
-安装、配置、停用和已知边界都写在插件自己的[README](plugins/dsh-publish/README.md)里；自己装、自己测。从GitHub装的最短路径：`git clone`本仓库 → 把`plugins/dsh-publish/cordis.patch.yml`里的三个`<占位符>`换成克隆目录的绝对路径 → `pnpm run dsh --patch "<克隆目录>/plugins/dsh-publish/cordis.patch.yml" web`。插件目录放哪里都行，不需要塞进DSH源码仓库（已实测）。
+安装、配置、停用和已知边界都写在插件自己的[README](plugins/dsh-publish/README.md)里；自己装、自己测。最短路径是一条命令，装完自动接线、不需要手动改profile：`dsh plugin --profile <profile> add github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish`。想改源码直引调试也可以，插件目录放哪里都行，不需要塞进DSH源码仓库（已实测）。
 
 ## 怎么用
 
