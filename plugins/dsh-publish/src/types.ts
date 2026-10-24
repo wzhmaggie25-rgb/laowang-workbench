@@ -7,6 +7,7 @@ export type ContentKind = 'video' | 'note' | 'article'
  * 提交了但拿不到确认证据，必须先查原记录，禁止直接重发。
  */
 export type PublishStatus =
+  | 'submitted'
   | 'prepared'
   | 'approved'
   | 'submitting'
@@ -53,6 +54,10 @@ export interface LedgerEntry {
   deviations: string[]
   /** 失败或未知态的说明。 */
   note?: string
+  /** Explicit confirmation surface for this attempt. */
+  approvalSource?: 'tool' | 'page'
+  /** Accepted submission time, used for the configured local-day quota. */
+  submittedAt?: string
 }
 
 /** 预检结果。 */
