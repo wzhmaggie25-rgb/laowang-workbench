@@ -1,5 +1,5 @@
 /** Model tools and Publish Center share one runtime. */
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -9,6 +9,7 @@ import { Config, resolveConfig, type LiveConfig } from './config.ts'
 import { requestSchema } from './contract.ts'
 import { Ledger } from './ledger.ts'
 import { PublishRuntime } from './runtime.ts'
+import { MetricsStore } from './metrics.ts'
 import { mountPublishApi } from './api.ts'
 export { Config }
 export const name = 'publish'
@@ -20,13 +21,12 @@ export async function apply(ctx: Context, live: LiveConfig & { ledgerPath?: stri
  const ledger = new Ledger(ledgerPath)
  await ledger.adoptLegacy(join(homedir(), '.dsh', 'publish', 'ledger.json'))
  await ledger.reconcileOnStart()
- const runtime = new PublishRuntime(ctx, ledger, resolved)
+ const metrics = new MetricsStore(join(dirname(ledgerPath), 'metrics.json'))
+ const runtime = new PublishRuntime(ctx, ledger, resolved, metrics)
   ctx.jobs.attachController('publish-center')
  ctx.effect(() => () => runtime.dispose(), 'publish: execution lifetime')
  // The page channel registers a physical route, so this fiber must also inject webServer.
- ctx.inject(['connection', 'webServer'], web => {
-  try { mountPublishApi(web, runtime, resolved, ledgerPath) } catch (error) { console.error('[publish-diag] mount threw synchronously:', error); throw error }
- })
+ ctx.inject(['connection', 'webServer'], web => mountPublishApi(web, runtime, resolved, ledgerPath, metrics))
   ctx.tools.register(defineTool({
     name: 'publish_accounts',
     description: '列出已配置的发布账号，并可查上游登录态。只读，不会发布。',

@@ -26,6 +26,8 @@ export const zh = {
  todayPublished:'今日已发', monthPublished:'本月已发', pendingCount:'待核实', scheduledCount:'已排期',
  globalCalendar:'发布日历（全局 · 点日期过滤）', dayRecords:'当日记录', monthRhythm:'本月节奏', platformOnly:'仅本平台', allAccounts:'全部账号',
  wd1:'一', wd2:'二', wd3:'三', wd4:'四', wd5:'五', wd6:'六', wd7:'日',
+ dataCenter:'数据中心', xhsDataOnly:'仅小红书 · 上游无播放量', likes:'点赞', collects:'收藏', comments:'评论', shares:'分享',
+ autoMatched:'自动匹配', manualMatched:'手动绑定', refreshData:'刷新数据', bindNote:'关联笔记', unbindNote:'解绑', noData:'还没有可展示的数据',
  'platform.xiaohongshu':'小红书', 'platform.douyin':'抖音', 'platform.kuaishou':'快手', 'platform.tencent':'视频号', 'platform.dayu':'大鱼号',
  'platform.baijiahao':'百家号', 'platform.alipay':'支付宝', 'platform.weibo':'微博', 'platform.hupu':'虎扑', 'platform.zhihu':'知乎',
  'platform.xueqiu':'雪球', 'platform.youtube':'YouTube', 'platform.bilibili':'哔哩哔哩', 'platform.tiktok':'TikTok',
@@ -59,6 +61,8 @@ export const en: Record<Key,string> = {
  todayPublished:'Today', monthPublished:'This month', pendingCount:'To verify', scheduledCount:'Scheduled',
  globalCalendar:'Calendar (global · click a date to filter)', dayRecords:'Records on this day', monthRhythm:'This month', platformOnly:'This platform only', allAccounts:'All accounts',
  wd1:'Mon', wd2:'Tue', wd3:'Wed', wd4:'Thu', wd5:'Fri', wd6:'Sat', wd7:'Sun',
+ dataCenter:'Data center', xhsDataOnly:'Xiaohongshu only · upstream has no view counts', likes:'Likes', collects:'Collects', comments:'Comments', shares:'Shares',
+ autoMatched:'Auto matched', manualMatched:'Manually linked', refreshData:'Refresh data', bindNote:'Link note', unbindNote:'Unlink', noData:'Nothing to show yet',
  'platform.xiaohongshu':'Xiaohongshu','platform.douyin':'Douyin','platform.kuaishou':'Kuaishou','platform.tencent':'WeChat Channels','platform.dayu':'Dayu',
  'platform.baijiahao':'Baijiahao','platform.alipay':'Alipay','platform.weibo':'Weibo','platform.hupu':'Hupu','platform.zhihu':'Zhihu','platform.xueqiu':'Xueqiu','platform.youtube':'YouTube','platform.bilibili':'Bilibili','platform.tiktok':'TikTok',
 }
