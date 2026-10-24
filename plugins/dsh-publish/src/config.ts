@@ -10,6 +10,8 @@ export interface Config {
   allowedPlatforms: string[]; allowedAccounts: string[]; headed: boolean
   httpTimeoutMs: number; publishTimeoutMs: number
   showSidebar: boolean; publishingEnabled: boolean; maxMediaBytes: number
+  /** 主页平台卡片顺序；由发布中心主页拖拽与「更多平台」面板管理，设置页不出文本框。 */
+  homeCards: string[]
 }
 export type LiveConfig = { [K in keyof Omit<Required<Config>, 'ledgerPath'>]: Volatile<Config[K]> }
 /** Schema defaults retain v0.1 upload behavior; UI preferences are independent. */
@@ -30,6 +32,7 @@ export const Config = Schema.object({
   showSidebar: Schema.boolean().default(true).volatile(),
   publishingEnabled: Schema.boolean().default(true).volatile(),
   maxMediaBytes: Schema.number().step(1).min(1).default(536870912).volatile(),
+  homeCards: Schema.array(String).default(['douyin', 'xiaohongshu', 'tencent']).volatile(),
 })
 /** Resolve one operation's configuration without retaining live references. */
 export function resolveConfig(config: LiveConfig & { ledgerPath?: string }): Config {
@@ -40,5 +43,6 @@ export function resolveConfig(config: LiveConfig & { ledgerPath?: string }): Con
     dailyLimit: config.dailyLimit.get(), dailyTimeZone: config.dailyTimeZone.get(), allowedPlatforms: [...config.allowedPlatforms.get()], allowedAccounts: [...config.allowedAccounts.get()],
     headed: config.headed.get(), httpTimeoutMs: config.httpTimeoutMs.get(), publishTimeoutMs: config.publishTimeoutMs.get(),
     showSidebar: config.showSidebar.get(), publishingEnabled: config.publishingEnabled.get(), maxMediaBytes: config.maxMediaBytes.get(),
+    homeCards: [...config.homeCards.get()],
   }
 }

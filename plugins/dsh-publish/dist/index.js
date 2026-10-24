@@ -30,7 +30,8 @@ var Config = Schema.object({
   publishTimeoutMs: Schema.number().min(1e3).default(9e5).volatile(),
   showSidebar: Schema.boolean().default(true).volatile(),
   publishingEnabled: Schema.boolean().default(true).volatile(),
-  maxMediaBytes: Schema.number().step(1).min(1).default(536870912).volatile()
+  maxMediaBytes: Schema.number().step(1).min(1).default(536870912).volatile(),
+  homeCards: Schema.array(String).default(["douyin", "xiaohongshu", "tencent"]).volatile()
 });
 function resolveConfig(config2) {
   return {
@@ -51,7 +52,8 @@ function resolveConfig(config2) {
     publishTimeoutMs: config2.publishTimeoutMs.get(),
     showSidebar: config2.showSidebar.get(),
     publishingEnabled: config2.publishingEnabled.get(),
-    maxMediaBytes: config2.maxMediaBytes.get()
+    maxMediaBytes: config2.maxMediaBytes.get(),
+    homeCards: [...config2.homeCards.get()]
   };
 }
 
@@ -14745,10 +14747,10 @@ function idempotencyKey(platform, account, digest) {
 
 // src/platforms.ts
 var PLATFORMS = [
-  { id: "xiaohongshu", adapter: "xhs", kinds: ["video", "note"], scheduling: "xhs", titleMaxChars: 20 },
+  { id: "xiaohongshu", adapter: "xhs", kinds: ["note", "video"], scheduling: "xhs", titleMaxChars: 20 },
   { id: "douyin", adapter: "sau", sauName: "douyin", kinds: ["video", "note"], scheduling: "sau" },
   { id: "kuaishou", adapter: "sau", sauName: "kuaishou", kinds: ["video", "note"], scheduling: "sau" },
-  { id: "tencent", adapter: "sau", sauName: "tencent", kinds: ["video"], scheduling: "sau" },
+  { id: "tencent", adapter: "sau", sauName: "tencent", kinds: ["video"], scheduling: "sau", acceptance: "pending" },
   { id: "dayu", adapter: "sau", sauName: "dayu", kinds: ["video", "article"], scheduling: "sau" },
   { id: "baijiahao", adapter: "sau", sauName: "baijiahao", kinds: ["video"], scheduling: "none" },
   { id: "alipay", adapter: "sau", sauName: "alipay", kinds: ["video"], scheduling: "none" },
@@ -15272,7 +15274,7 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath) {
     });
   }, "publish: upload lifetime");
   const endpoints = {
-    state: async () => ({ ...await runtime.status(), platforms: PLATFORMS, configuredAccounts: config2().accounts, publishingEnabled: config2().publishingEnabled, ledgerPath }),
+    state: async () => ({ ...await runtime.status(), platforms: PLATFORMS, configuredAccounts: config2().accounts, publishingEnabled: config2().publishingEnabled, homeCards: config2().homeCards, ledgerPath }),
     accounts: async () => runtime.accounts(),
     prepare: async (payload, signal) => {
       signal.throwIfAborted();

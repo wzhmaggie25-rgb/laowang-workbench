@@ -30,7 +30,7 @@ export function mountPublishApi(ctx: Context, runtime: PublishRuntime, config: (
  const uploads = new Set<Promise<Response>>()
  ctx.effect(() => () => { lifetime.abort(); tickets.clear(); return Promise.allSettled([...uploads]).then(() => {}) }, 'publish: upload lifetime')
  const endpoints: Record<string, PageEndpoint> = {
-  state: async () => ({ ...(await runtime.status()), platforms: PLATFORMS, configuredAccounts: config().accounts, publishingEnabled: config().publishingEnabled, ledgerPath }),
+  state: async () => ({ ...(await runtime.status()), platforms: PLATFORMS, configuredAccounts: config().accounts, publishingEnabled: config().publishingEnabled, homeCards: config().homeCards, ledgerPath }),
   accounts: async () => runtime.accounts(),
   prepare: async (payload, signal) => {
    signal.throwIfAborted()

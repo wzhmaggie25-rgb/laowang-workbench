@@ -1,4 +1,4 @@
-/** Isolated real-host page acceptance; never logs in or publishes. */
+/** Isolated real-host page acceptance for the platform-first IA; never logs in or publishes. */
 import {createRequire} from 'node:module'
 import {readFile,writeFile} from 'node:fs/promises'
 import {resolve} from 'node:path'
@@ -43,42 +43,82 @@ try{
    await page.waitForTimeout(250)
   }
  }
+ const pollFile=async(path,test,timeoutMs=15000,label='文件状态')=>{
+  const deadline=Date.now()+timeoutMs
+  for(;;){
+   try{if(test(await readFile(path,'utf8')))return}catch{/* 文件可能尚未产生 */}
+   if(Date.now()>deadline)throw new Error('等待超时：'+label)
+   await page.waitForTimeout(300)
+  }
+ }
  await page.goto(url)
  await dismissWelcome()
  await openCenter()
- await page.getByRole('tab',{name:/新建发布|New post/}).waitFor()
- // 账号数据来自 /publish 通道；等待真实就绪状态而不是固定延时。
- await poll(async()=>await page.locator('select').nth(1).inputValue()==='page-test',15000,'账号选择框显示 page-test')
+ // 总览：三张默认平台卡按序出现。
+ await poll(async()=>{
+  const names=await page.locator('.publish-pcard[data-platform] .publish-pname').allInnerTexts()
+  return JSON.stringify(names)===JSON.stringify(['抖音','小红书','视频号'])
+ },15000,'默认平台卡片 抖音/小红书/视频号')
+ // 小红书详情：账号数据来自页面通道。
+ await page.locator('.publish-pcard[data-platform="xiaohongshu"]').getByRole('button',{name:/^(查看该平台|Open platform)$/}).click()
+ await page.locator('.publish-detail').waitFor()
+ await poll(async()=>await page.locator('.publish-detail select').nth(1).inputValue()==='page-test',15000,'小红书详情表单账号 page-test')
  await page.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-center.png',fullPage:true})
+ // 返回总览，侧栏开关隐藏/恢复。
+ await page.getByRole('button',{name:/^(返回总览|Back to overview)$/}).click()
  await page.getByRole('tab',{name:/^设置$|^Settings$/}).click()
  await page.getByRole('switch',{name:/在侧栏显示发布中心|Show Publish Center in sidebar/}).click()
  await page.getByRole('button',{name:/^保存设置$|^Save settings$/}).click()
- const sidebarButton=page.getByRole('button',{name:/^(发布中心|Publish Center)$/}).first()
  await poll(async()=>(await page.getByRole('button',{name:/^(发布中心|Publish Center)$/}).count())===0,15000,'侧栏入口隐藏')
  await page.getByRole('switch',{name:/在侧栏显示发布中心|Show Publish Center in sidebar/}).click()
  await page.getByRole('button',{name:/^保存设置$|^Save settings$/}).click()
  await poll(async()=>(await page.getByRole('button',{name:/^(发布中心|Publish Center)$/}).count())===1,15000,'侧栏入口恢复')
+ // 账号：新增抖音账号，主页卡片与抖音详情表单同步。
  await page.getByRole('tab',{name:/^账号$|^Accounts$/}).click()
  await page.getByRole('button',{name:/添加账号|Add account/}).click()
  const input=page.locator('.publish-account-edit input').last()
  await input.fill('second-test')
  await page.getByRole('button',{name:/^保存设置$|^Save settings$/}).click()
- await page.getByRole('tab',{name:/新建发布|New post/}).click()
- await page.locator('select').nth(0).selectOption('douyin')
- await poll(async()=>await page.locator('select').nth(1).inputValue()==='second-test',15000,'新账号出现在抖音账号列表')
+ await page.getByRole('tab',{name:/^总览$|^Overview$/}).click()
+ await poll(async()=>{
+  const badge=await page.locator('.publish-pcard[data-platform="douyin"] .publish-accs').innerText()
+  return badge.includes('second-test')
+ },15000,'新账号出现在抖音卡片')
+ await page.locator('.publish-pcard[data-platform="douyin"]').getByRole('button',{name:/^(查看该平台|Open platform)$/}).click()
+ await poll(async()=>await page.locator('.publish-detail select').nth(1).inputValue()==='second-test',15000,'抖音详情表单账号 second-test')
+ // 拖拽排序：抖音卡拖到小红书位置，刷新后顺序保留。
+ await page.getByRole('button',{name:/^(返回总览|Back to overview)$/}).click()
+ const source=page.locator('.publish-pcard[data-platform="douyin"] .publish-drag')
+ const target=page.locator('.publish-pcard[data-platform="xiaohongshu"]')
+ const from=await source.boundingBox(),to=await target.boundingBox()
+ await page.mouse.move(from.x+from.width/2,from.y+from.height/2)
+ await page.mouse.down()
+ await page.mouse.move(to.x+to.width/2,to.y+to.height/2,{steps:12})
+ await page.mouse.up()
+ await poll(async()=>{
+  const names=await page.locator('.publish-pcard[data-platform] .publish-pname').allInnerTexts()
+  return JSON.stringify(names)===JSON.stringify(['小红书','抖音','视频号'])
+ },15000,'拖拽后顺序变为 小红书/抖音/视频号')
+ // 等写入真正落盘（profile patch 出现 homeCards）再刷新，避免竞态。
+ await pollFile(process.env.PUBLISH_TEST_DIR+'/profiles/web/cordis.patch.yml',text=>text.includes('homeCards'),15000,'卡片顺序写入 profile patch')
  await page.reload()
  await dismissWelcome()
  await openCenter()
- await page.getByRole('tab',{name:/^设置$|^Settings$/}).click()
- assert.equal(await page.getByRole('switch',{name:/在侧栏显示发布中心|Show Publish Center in sidebar/}).getAttribute('aria-checked'),'true')
- await page.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-settings.png',fullPage:true})
+ await poll(async()=>{
+  const names=await page.locator('.publish-pcard[data-platform] .publish-pname').allInnerTexts()
+  return JSON.stringify(names)===JSON.stringify(['小红书','抖音','视频号'])
+ },15000,'刷新后拖拽顺序保留')
+ // 全局日历：点今天 → 当日记录区出现（空台账显示空态）。
+ await page.locator('.publish-cell.today').click()
+ await page.locator('.publish-section', {hasText: '当日记录'}).waitFor()
+ // 420px 窄窗不溢出。
  await page.setViewportSize({width:420,height:900})
- await page.getByRole('tab',{name:/新建发布|New post/}).click()
+ await page.getByRole('tab',{name:/^总览$|^Overview$/}).click()
  assert.ok(await page.locator('.publish-center').evaluate(el=>el.scrollWidth<=el.clientWidth+1))
  await page.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-mobile.png',fullPage:true})
  if(errors.length)throw new Error('页面或接口错误：'+errors.join('\n'))
- console.log('PASS: real Host client activation, custom account, sidebar hide/restore, settings persistence, account editing, 420px overflow')
- await writeFile(result,JSON.stringify({passed:true,checks:['client activation','account data via /publish channel','sidebar visibility persistence','account changes','reload persistence','420px overflow'],pageErrors:errors},null,2)+'\n')
+ console.log('PASS: overview matrix, platform detail, sidebar toggle, account sync, drag reorder persistence, calendar filter, 420px overflow')
+ await writeFile(result,JSON.stringify({passed:true,checks:['overview matrix order','platform detail via card','sidebar visibility persistence','account changes sync','drag reorder + reload persistence','calendar day filter','420px overflow'],pageErrors:errors},null,2)+'\n')
 }catch(error){
  await page?.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-failure.png',fullPage:true}).catch(()=>{})
  await writeFile(result,JSON.stringify({passed:false,failure:String(error&&error.stack||error)},null,2)+'\n').catch(()=>{})
