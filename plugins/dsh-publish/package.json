@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-publish",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness 发布端插件：唯一发布入口、人工审批门禁、回执台账",
