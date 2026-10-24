@@ -56,6 +56,52 @@ try{
  await page.goto(url)
  await dismissWelcome()
  await openCenter()
+ // ===== 智能助手闭环（批次 1 验收路径，mock provider）=====
+ await page.getByRole('tab',{name:/^智能发布$|^Smart publish$/}).click()
+ await page.locator('.publish-assist-paste').fill('这是一份测试素材：讲我们发布插件的智能助手升级。发布时每个平台要填的字段太多，标题、正文、标签规则都不一样；助手先理解素材，再按平台生成版本，人完成最终发布。')
+ await page.getByRole('button',{name:/^开始$|^Start$/}).click()
+ await poll(async()=>(await page.locator('.publish-section-heading h2').allInnerTexts()).includes('素材'),15000,'素材入库')
+ await page.getByRole('button',{name:/AI 理解与推荐|Understand & recommend/}).click()
+ await poll(async()=>(await page.locator('.publish-suggest').count())>=2,20000,'AI 理解返回两个平台建议')
+ // 生成两个平台的版本（结构不同：小红书 title/body/tags；公众号 title/digest/body）
+ await page.locator('.publish-suggest',{hasText:/小红书|Xiaohongshu/}).first().click()
+ await poll(async()=>(await page.locator('.publish-platform-version').count())===1,20000,'小红书版本生成')
+ await page.locator('.publish-suggest',{hasText:/公众号|Official Account/}).first().click()
+ await poll(async()=>(await page.locator('.publish-platform-version').count())===2,20000,'公众号版本生成')
+ const gzh=page.locator('.publish-platform-version',{hasText:/公众号|Official Account/})
+ const xhs=page.locator('.publish-platform-version',{hasText:/小红书|Xiaohongshu/})
+ await poll(async()=>(await gzh.locator('.publish-field').count())===3,10000,'公众号三字段（title/digest/body）')
+ await poll(async()=>(await xhs.locator('.publish-field').count())===3,10000,'小红书三字段（title/body/tags）')
+ // 用户改小红书标题 → edited 保护
+ await xhs.locator('.publish-field',{hasText:'title'}).locator('.publish-field-text').click()
+ await xhs.locator('.publish-field',{hasText:'title'}).locator('textarea').fill('我的人工标题')
+ await page.keyboard.press('Tab')
+ await poll(async()=>(await xhs.locator('.publish-field',{hasText:'title'}).locator('.chip.c-warn').count())===1,15000,'标题标记为人工修改')
+ // 定向修改 + 重新生成：title 被保护，body 更新
+ await page.locator('.publish-instruction input').fill('只改小红书开头')
+ await xhs.getByRole('button',{name:/重新生成|Regenerate/}).click()
+ await poll(async()=>(await xhs.locator('.publish-notice',{hasText:/不会被覆盖|are kept/}).count())===1,20000,'重新生成后保护已编辑字段')
+ await poll(async()=>(await xhs.locator('.publish-field').first().locator('.publish-field-text').innerText()).includes('我的人工标题'),10000,'人工标题未被覆盖')
+ // 标记已发（链接选填）→ 撤销
+ await xhs.getByRole('button',{name:/标记已发|Mark published/}).click()
+ await xhs.locator('.publish-markrow input').fill('https://example.com/xhs/1')
+ await xhs.getByRole('button',{name:/确认已发|Confirm/}).click()
+ await poll(async()=>(await xhs.locator('.chip.c-ok',{hasText:/已标记发布|Marked/}).count())===1,10000,'已标记发布')
+ await xhs.getByRole('button',{name:/撤销标记|Undo mark/}).click()
+ await poll(async()=>(await xhs.getByRole('button',{name:/标记已发|Mark published/}).count())===1,10000,'撤销后恢复标记入口')
+ // 刷新：草稿与人工标题恢复
+ await page.reload()
+ await dismissWelcome()
+ await openCenter()
+ await page.getByRole('tab',{name:/^草稿$|^Drafts$/}).click()
+ await poll(async()=>(await page.locator('.publish-draft-row').count())>=1,20000,'草稿列表出现')
+ await page.locator('.publish-draft-row').first().click()
+ await poll(async()=>(await page.locator('.publish-platform-version').count())===2,15000,'刷新后两个平台版本恢复')
+ await poll(async()=>(await xhs.locator('.publish-field').first().locator('.publish-field-text').innerText()).includes('我的人工标题'),10000,'刷新后人工标题保留')
+ // 生成依据落盘
+ await poll(async()=>{const fs=await import('node:fs/promises');const text=await fs.readFile(process.env.PUBLISH_TEST_DIR+'/publish/assistant/generations.jsonl','utf8').catch(()=>'');return text.includes('"task":"understand"')&&text.includes('"task":"adapt"')},15000,'generations.jsonl 记录 understand 与 adapt')
+ // ===== 总览（原 v0.3 矩阵回归）=====
+ await page.getByRole('tab',{name:/^总览$|^Overview$/}).click()
  // 总览：三张默认平台卡按序出现。
  await poll(async()=>{
   const names=await page.locator('.publish-pcard[data-platform] .publish-pname').allInnerTexts()
@@ -106,6 +152,8 @@ try{
  await page.reload()
  await dismissWelcome()
  await openCenter()
+ // v0.4 起默认页是智能发布；总览卡片断言前先切回总览。
+ await page.getByRole('tab',{name:/^总览$|^Overview$/}).click()
  await poll(async()=>{
   const names=await page.locator('.publish-pcard[data-platform] .publish-pname').allInnerTexts()
   return JSON.stringify(names)===JSON.stringify(['小红书','抖音','视频号'])
@@ -140,8 +188,8 @@ try{
  assert.ok(await page.locator('.publish-center').evaluate(el=>el.scrollWidth<=el.clientWidth+1))
  await page.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-mobile.png',fullPage:true})
  if(errors.length)throw new Error('页面或接口错误：'+errors.join('\n'))
- console.log('PASS: overview matrix, platform detail, sidebar toggle, account sync, drag reorder persistence, calendar filter, mock publish→auto-match→metrics loop, 420px overflow')
- await writeFile(result,JSON.stringify({passed:true,checks:['overview matrix order','platform detail via card','sidebar visibility persistence','account changes sync','drag reorder + reload persistence','calendar day filter','mock publish closed loop with auto-match and metrics','420px overflow'],pageErrors:errors},null,2)+'\n')
+ console.log('PASS: assistant closed loop (understand→2 platforms→edit protection→targeted regen→mark/unmark→reload recovery→generation log), overview matrix, platform detail, sidebar toggle, drag reorder persistence, calendar filter, mock publish loop, 420px overflow')
+ await writeFile(result,JSON.stringify({passed:true,checks:['assistant material + understand','two-platform distinct versions','user edit protection on regenerate','targeted revision instruction','mark published + undo','reload recovery of drafts and edits','generation log persisted','overview matrix order','platform detail via card','sidebar visibility persistence','drag reorder + reload persistence','calendar day filter','mock publish closed loop','420px overflow'],pageErrors:errors},null,2)+'\n')
 }catch(error){
  await page?.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-failure.png',fullPage:true}).catch(()=>{})
  await writeFile(result,JSON.stringify({passed:false,failure:String(error&&error.stack||error)},null,2)+'\n').catch(()=>{})

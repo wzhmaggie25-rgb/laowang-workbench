@@ -121,7 +121,7 @@ var PublishController = class {
   scope;
   form;
   settings;
-  state = (0, import_dsh_client_store.createSnapshotStore)({ loading: true, busy: false, draft: { platform: "douyin", account: "", kind: "note", title: "", body: "", media: [] }, attachments: [], view: { view: "home" }, tab: "overview", moreOpen: false });
+  state = (0, import_dsh_client_store.createSnapshotStore)({ loading: true, busy: false, draft: { platform: "douyin", account: "", kind: "note", title: "", body: "", media: [] }, attachments: [], view: { view: "home" }, tab: "assist", moreOpen: false });
   abort = new AbortController();
   timer;
   generation = 0;
@@ -272,11 +272,12 @@ var PublishController = class {
     });
   }
   async loadMetrics() {
-    await this.action(async () => {
-      const result = await this.call("metrics.list");
-      this.state.update((s) => {
-        s.metrics = result.metrics;
-      });
+    await this.action(() => this.runLoadMetrics());
+  }
+  async runLoadMetrics() {
+    const result = await this.call("metrics.list");
+    this.state.update((s) => {
+      s.metrics = result.metrics;
     });
   }
   async refreshMetrics() {
@@ -306,7 +307,7 @@ var PublishController = class {
         s.bindTarget = void 0;
         s.notes = void 0;
       });
-      await this.loadMetrics();
+      await this.runLoadMetrics();
     });
   }
   cancelBind() {
@@ -318,7 +319,107 @@ var PublishController = class {
   async unbindNote(prepareId) {
     await this.action(async () => {
       await this.call("metrics.unbind", { prepareId });
-      await this.loadMetrics();
+      await this.runLoadMetrics();
+    });
+  }
+  /** ===== 智能发布助手 ===== */
+  async loadDrafts() {
+    await this.action(async () => {
+      const result = await this.call("assistant.drafts");
+      this.state.update((s) => {
+        s.assist = { drafts: result.drafts, platformDrafts: {}, manualRecords: [], rules: s.assist?.rules ?? [], adaptResults: s.assist?.adaptResults ?? {}, instruction: s.assist?.instruction ?? "" };
+      });
+    });
+  }
+  async createMaterial(kind, text, origin) {
+    await this.action(async () => {
+      const result = await this.call("assistant.material", { kind, text, origin });
+      await this.runLoadDraft(result.material.draftId);
+    });
+  }
+  async runLoadDraft(draftId) {
+    const result = await this.call("assistant.draft", { draftId });
+    this.state.update((s) => {
+      s.activeDraftId = draftId;
+      s.tab = "assist";
+      s.view = { view: "home" };
+      s.assist = {
+        drafts: s.assist?.drafts ?? [],
+        material: result.material,
+        platformDrafts: Object.fromEntries(result.platformDrafts.map((row) => [row.platform, row.draft])),
+        manualRecords: result.manualRecords,
+        rules: result.rules,
+        adaptResults: s.assist?.adaptResults ?? {},
+        instruction: s.assist?.instruction ?? ""
+      };
+    });
+  }
+  async loadDraft(draftId) {
+    await this.action(() => this.runLoadDraft(draftId));
+  }
+  setInstruction(text) {
+    this.state.update((s) => {
+      if (s.assist) s.assist.instruction = text;
+    });
+  }
+  async understand() {
+    await this.action(async () => {
+      const material = this.state.getSnapshot().assist?.material;
+      if (!material) throw new Error("\u5148\u8F93\u5165\u7D20\u6750");
+      const result = await this.call("ai.understand", { draftId: material.draftId });
+      this.state.update((s) => {
+        if (s.assist) s.assist.understanding = result.understanding;
+      });
+    });
+  }
+  async adapt(platform, form) {
+    await this.action(async () => {
+      const snapshot = this.state.getSnapshot();
+      const material = snapshot.assist?.material;
+      if (!material) throw new Error("\u5148\u8F93\u5165\u7D20\u6750");
+      const instruction = snapshot.assist?.instruction.trim() || void 0;
+      const result = await this.call("ai.adapt", { draftId: material.draftId, platform, form, ...instruction ? { instruction } : {} });
+      this.state.update((s) => {
+        if (s.assist) {
+          s.assist.platformDrafts = { ...s.assist.platformDrafts, [platform]: result.draft };
+          s.assist.adaptResults = { ...s.assist.adaptResults, [platform]: result };
+          s.assist.instruction = "";
+        }
+      });
+    });
+  }
+  async saveField(platform, form, field, text) {
+    await this.action(async () => {
+      const snapshot = this.state.getSnapshot();
+      const draft = snapshot.assist?.platformDrafts[platform];
+      if (!draft) throw new Error("\u8BE5\u5E73\u53F0\u8FD8\u6CA1\u6709\u8349\u7A3F");
+      const result = await this.call("assistant.saveField", { draftId: snapshot.assist.material.draftId, platform, form, field, text, expectedRevision: draft.revision });
+      this.state.update((s) => {
+        if (s.assist) {
+          s.assist.platformDrafts = { ...s.assist.platformDrafts, [platform]: result.draft };
+          const prior = s.assist.adaptResults[platform];
+          if (prior) s.assist.adaptResults = { ...s.assist.adaptResults, [platform]: { ...prior, checks: result.checks } };
+        }
+      });
+    });
+  }
+  async markPublished(platform, link) {
+    await this.action(async () => {
+      const snapshot = this.state.getSnapshot();
+      const material = snapshot.assist?.material;
+      if (!material) throw new Error("\u5148\u8F93\u5165\u7D20\u6750");
+      const result = await this.call("assistant.mark", { draftId: material.draftId, platform, ...link ? { link } : {} });
+      this.state.update((s) => {
+        if (s.assist) s.assist.manualRecords = [...s.assist.manualRecords.filter((row) => !(row.platform === platform && row.draftId === material.draftId)), result.record];
+      });
+    });
+  }
+  async unmarkPublished(platform) {
+    await this.action(async () => {
+      const material = this.state.getSnapshot().assist?.material;
+      if (!material) throw new Error("\u5148\u8F93\u5165\u7D20\u6750");
+      await this.call("assistant.unmark", { draftId: material.draftId, platform });
+      await this.runLoadDraft(material.draftId);
     });
   }
   async action(work) {
@@ -410,6 +511,22 @@ var PublishController = class {
       void this.bindNote(noteId);
     }, cancelBind: () => this.cancelBind(), unbindNote: (prepareId) => {
       void this.unbindNote(prepareId);
+    }, loadDrafts: () => {
+      void this.loadDrafts();
+    }, createMaterial: (kind, text, origin) => {
+      void this.createMaterial(kind, text, origin);
+    }, loadDraft: (draftId) => {
+      void this.loadDraft(draftId);
+    }, setInstruction: (text) => this.setInstruction(text), understand: () => {
+      void this.understand();
+    }, adapt: (platform, form) => {
+      void this.adapt(platform, form);
+    }, saveField: (platform, form, field, text) => {
+      void this.saveField(platform, form, field, text);
+    }, markPublished: (platform, link) => {
+      void this.markPublished(platform, link);
+    }, unmarkPublished: (platform) => {
+      void this.unmarkPublished(platform);
     }, refresh: () => {
       void this.refresh();
     }, check: () => {
@@ -434,8 +551,8 @@ function message(error) {
 }
 
 // src/client/Page.tsx
-var import_react2 = require("react");
-var import_dsh_client_ui_primitives4 = require("@deepseek-ai/dsh-client-ui-primitives");
+var import_react3 = require("react");
+var import_dsh_client_ui_primitives5 = require("@deepseek-ai/dsh-client-ui-primitives");
 
 // src/client/common.tsx
 var import_dsh_client_ui_primitives2 = require("@deepseek-ai/dsh-client-ui-primitives");
@@ -595,6 +712,52 @@ var zh = {
   bindNote: "\u5173\u8054\u7B14\u8BB0",
   unbindNote: "\u89E3\u7ED1",
   noData: "\u8FD8\u6CA1\u6709\u53EF\u5C55\u793A\u7684\u6570\u636E",
+  assistTab: "\u667A\u80FD\u53D1\u5E03",
+  draftsTab: "\u8349\u7A3F",
+  draftsTitle: "\u8349\u7A3F",
+  draftsEmpty: "\u8FD8\u6CA1\u6709\u8349\u7A3F\uFF1B\u53BB\u300C\u667A\u80FD\u53D1\u5E03\u300D\u8D34\u5165\u7B2C\u4E00\u4EFD\u7D20\u6750",
+  assistTitle: "\u8FD9\u6B21\u8981\u53D1\u4EC0\u4E48\uFF1F",
+  assistHint: "\u7C98\u8D34\u6210\u7A3F\uFF0C\u6216\u9009\u62E9 Markdown / TXT / SRT \u5B57\u5E55\u6587\u4EF6\u3002AI \u5148\u7406\u89E3\u5185\u5BB9\uFF0C\u518D\u6309\u5E73\u53F0\u751F\u6210\u53EF\u53D1\u5E03\u7684\u7248\u672C\uFF1B\u53D1\u5E03\u6C38\u8FDC\u7531\u4F60\u5B8C\u6210\u3002",
+  assistPlaceholder: "\u628A\u8FD9\u6B21\u8981\u53D1\u7684\u5185\u5BB9\u7C98\u5230\u8FD9\u91CC\u2026\uFF08\u652F\u6301\u5B57\u5E55\u3001\u8BB2\u7A3F\u3001\u6587\u7AE0\u8349\u7A3F\uFF09",
+  assistOrigin: "\u6765\u6E90\u5907\u6CE8",
+  assistPickSrt: "\u9009\u62E9 MD/TXT/SRT \u6587\u4EF6",
+  assistStart: "\u5F00\u59CB",
+  assistNewMaterial: "\u6362\u4E00\u4EFD\u7D20\u6750",
+  assistMaterial: "\u7D20\u6750",
+  assistViewMaterial: "\u67E5\u770B\u7D20\u6750\u539F\u6587",
+  assistAttachmentsNotRead: "\u9644\u4EF6\u672A\u8BFB\u53D6\u5185\u5BB9\uFF1A",
+  assistUnderstand: "AI \u7406\u89E3\u4E0E\u63A8\u8350",
+  assistThinking: "\u751F\u6210\u4E2D\u2026",
+  assistUnderstanding: "AI \u7684\u7406\u89E3",
+  assistAudience: "\u9762\u5411",
+  assistQuestion: "\u7D20\u6750\u7F3A\u4E00\u4E2A\u5173\u952E\u4E8B\u5B9E\uFF1A",
+  assistRetryUnderstand: "\u91CD\u8BD5\u7406\u89E3",
+  assistSuggestions: "\u5EFA\u8BAE\u53D1\u5E03\u5230",
+  assistTargeted: "\u5B9A\u5411\u4FEE\u6539\uFF08\u53EF\u9009\uFF09",
+  assistInstructionHint: "\u4F8B\u5982\uFF1A\u53EA\u6539\u5C0F\u7EA2\u4E66\u5F00\u5934\uFF1B\u516C\u4F17\u53F7\u4FDD\u7559\u539F\u6587\u4E0D\u6269\u5199\uFF1B\u4E09\u4E2A\u5E73\u53F0\u90FD\u5C11\u4E00\u70B9\u63A8\u9500\u53E3\u543B",
+  assistInstructionNote: "\u586B\u5199\u540E\u70B9\u4EFB\u610F\u5E73\u53F0\u7684\u300C\u91CD\u65B0\u751F\u6210\u300D\u5373\u6309\u6B64\u6307\u4EE4\u5B9A\u5411\u4FEE\u6539\uFF1B\u53EA\u4F5C\u7528\u4E8E\u672A\u88AB\u4F60\u6539\u8FC7\u7684\u5B57\u6BB5\u3002",
+  assistChanges: "\u6539\u4E86\u4EC0\u4E48\u3001\u4E3A\u4EC0\u4E48",
+  assistWarnings: "AI \u81EA\u67E5\u63D0\u9192\uFF1A",
+  assistProtected: "\u4F60\u6539\u8FC7\u7684\u5B57\u6BB5\u4E0D\u4F1A\u88AB\u8986\u76D6\uFF08\u4FDD\u6301\u4F60\u7684\u7248\u672C\uFF09\uFF1A",
+  assistRegenerate: "\u91CD\u65B0\u751F\u6210",
+  assistEdited: "\u5DF2\u4EBA\u5DE5\u4FEE\u6539",
+  assistCopy: "\u590D\u5236",
+  assistCopied: "\u5DF2\u590D\u5236",
+  assistCopyAll: "\u590D\u5236\u5168\u90E8",
+  assistWeighted: "\u52A0\u6743\u5B57\u7B26",
+  assistChars: "\u5B57",
+  assistEmptyField: "\uFF08\u7A7A\uFF09\u70B9\u6B64\u586B\u5199",
+  assistOpenStudio: "\u6253\u5F00\u53D1\u5E03\u9875",
+  assistMark: "\u6807\u8BB0\u5DF2\u53D1",
+  assistMarkConfirm: "\u786E\u8BA4\u5DF2\u53D1",
+  assistUnmark: "\u64A4\u9500\u6807\u8BB0",
+  assistLinkOptional: "\u4F5C\u54C1\u94FE\u63A5\uFF08\u9009\u586B\uFF09",
+  assistMarked: "\u5DF2\u6807\u8BB0\u53D1\u5E03",
+  assistMarkedNote: "\u4EBA\u5DE5\u6807\u8BB0\uFF0C\u672A\u6838\u9A8C \xB7 ",
+  assistReady: "\u5DF2\u5C31\u7EEA",
+  assistDraft: "\u8349\u7A3F",
+  assistHardExceeded: "\u8D85\u51FA\u786C\u9650",
+  "platform.gongzhonghao": "\u516C\u4F17\u53F7",
   "platform.xiaohongshu": "\u5C0F\u7EA2\u4E66",
   "platform.douyin": "\u6296\u97F3",
   "platform.kuaishou": "\u5FEB\u624B",
@@ -764,6 +927,52 @@ var en = {
   bindNote: "Link note",
   unbindNote: "Unlink",
   noData: "Nothing to show yet",
+  assistTab: "Smart publish",
+  draftsTab: "Drafts",
+  draftsTitle: "Drafts",
+  draftsEmpty: "No drafts yet; paste your first material in Smart publish",
+  assistTitle: "What are you publishing this time?",
+  assistHint: "Paste a finished draft, or pick a Markdown / TXT / SRT file. AI understands it first, then generates per-platform versions; publishing stays yours.",
+  assistPlaceholder: "Paste the content to publish\u2026 (subtitles, script, article draft)",
+  assistOrigin: "Origin note",
+  assistPickSrt: "Pick MD/TXT/SRT file",
+  assistStart: "Start",
+  assistNewMaterial: "New material",
+  assistMaterial: "Material",
+  assistViewMaterial: "View original material",
+  assistAttachmentsNotRead: "Attachments not read: ",
+  assistUnderstand: "Understand & recommend",
+  assistThinking: "Generating\u2026",
+  assistUnderstanding: "AI understanding",
+  assistAudience: "Audience",
+  assistQuestion: "One key fact is missing: ",
+  assistRetryUnderstand: "Retry understanding",
+  assistSuggestions: "Suggested for",
+  assistTargeted: "Targeted revision (optional)",
+  assistInstructionHint: "e.g. only rewrite the Xiaohongshu opening; keep the article verbatim; soften the sales tone everywhere",
+  assistInstructionNote: "Fill this, then click Regenerate on a platform to apply it; fields you edited are never overwritten.",
+  assistChanges: "What changed and why",
+  assistWarnings: "AI self-check: ",
+  assistProtected: "Fields you edited are kept as yours: ",
+  assistRegenerate: "Regenerate",
+  assistEdited: "Edited by you",
+  assistCopy: "Copy",
+  assistCopied: "Copied",
+  assistCopyAll: "Copy all",
+  assistWeighted: "weighted chars",
+  assistChars: " chars",
+  assistEmptyField: "(empty) click to fill",
+  assistOpenStudio: "Open studio",
+  assistMark: "Mark published",
+  assistMarkConfirm: "Confirm",
+  assistUnmark: "Undo mark",
+  assistLinkOptional: "Post link (optional)",
+  assistMarked: "Marked published",
+  assistMarkedNote: "Manually marked, unverified \xB7 ",
+  assistReady: "Ready",
+  assistDraft: "Draft",
+  assistHardExceeded: "Over hard limit",
+  "platform.gongzhonghao": "Official Account",
   "platform.xiaohongshu": "Xiaohongshu",
   "platform.douyin": "Douyin",
   "platform.kuaishou": "Kuaishou",
@@ -1151,12 +1360,288 @@ function scheduleInput(value) {
   return local.toISOString().slice(0, 16);
 }
 
-// src/client/Page.tsx
+// src/client/Assistant.tsx
+var import_react2 = require("react");
+var import_dsh_client_ui_primitives4 = require("@deepseek-ai/dsh-client-ui-primitives");
 var import_jsx_runtime3 = require("react/jsx-runtime");
-function PublishIcon({ size }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.IconSendOutlineRegular, { size });
+var FORM_LABEL = { note: "\u56FE\u6587", article: "\u6587\u7AE0", video: "\u89C6\u9891", shortpost: "\u77ED\u5E16" };
+async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
 }
-var TAB_KEYS = [{ key: "overview", label: "overview" }, { key: "accounts", label: "accounts" }, { key: "settings", label: "settings" }];
+function Assistant({ state, face, t }) {
+  const assist = state.assist;
+  const material = assist?.material;
+  const [paste, setPaste] = (0, import_react2.useState)("");
+  const [pasteOrigin, setPasteOrigin] = (0, import_react2.useState)("\u7C98\u8D34");
+  const [marking, setMarking] = (0, import_react2.useState)(null);
+  const [markLink, setMarkLink] = (0, import_react2.useState)("");
+  const [copied, setCopied] = (0, import_react2.useState)("");
+  const doCopy = async (field, text) => {
+    if (await copy(text)) setCopied(field + "-ok");
+  };
+  if (!material) {
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section publish-assist-entry", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("assistTitle") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: t("assistHint") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("textarea", { className: "publish-assist-paste", rows: 10, placeholder: t("assistPlaceholder"), value: paste, onChange: (e) => setPaste(e.target.value) }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-assist-entryrow", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Input, { value: pasteOrigin, "aria-label": t("assistOrigin"), onChange: (e) => setPasteOrigin(e.target.value), placeholder: t("assistOrigin") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: "publish-upload", children: [
+          t("assistPickSrt"),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("input", { type: "file", accept: ".srt,.md,.txt", onChange: (e) => {
+            const file = e.target.files?.[0];
+            if (file) {
+              void file.text().then((text) => {
+                const kind = file.name.endsWith(".srt") ? "srt" : file.name.endsWith(".md") ? "markdown" : "paste";
+                face.createMaterial(kind, text, file.name);
+              });
+            }
+            e.target.value = "";
+          } })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", disabled: state.busy || paste.trim().length === 0, onClick: () => face.createMaterial("paste", paste, pasteOrigin || "\u7C98\u8D34"), children: t("assistStart") })
+      ] })
+    ] });
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-assist", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-section-heading", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("assistMaterial") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "chip c-muted", children: [
+          material.origin,
+          " \xB7 ",
+          material.kind.toUpperCase(),
+          " \xB7 ",
+          material.contentHash.slice(0, 8)
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("details", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("summary", { children: t("assistViewMaterial") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("pre", { className: "publish-material-pre", children: material.text })
+      ] }),
+      material.attachments.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("p", { className: "publish-na", children: [
+        t("assistAttachmentsNotRead"),
+        material.attachments.map((a) => a.path.split(/[\\/]/).pop()).join("\u3001")
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-actions", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", onClick: face.understand, disabled: state.busy, children: state.busy ? t("assistThinking") : t("assistUnderstand") }) })
+    ] }),
+    assist?.understanding && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("assistUnderstanding") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("strong", { children: assist.understanding.summary }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("p", { className: "publish-assist-audience", children: [
+        t("assistAudience"),
+        "\uFF1A",
+        assist.understanding.audience
+      ] }),
+      assist.understanding.facts.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("ul", { className: "publish-facts", children: assist.understanding.facts.map((fact, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("li", { children: [
+        fact.claim,
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("blockquote", { children: fact.quote })
+      ] }, index)) }),
+      assist.understanding.question && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-notice", children: [
+        t("assistQuestion"),
+        assist.understanding.question.question,
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: assist.understanding.question.why }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.understand, disabled: state.busy, children: t("assistRetryUnderstand") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h3", { children: t("assistSuggestions") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-suggest-row", children: assist.understanding.suggestions.map((s) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("button", { type: "button", className: "publish-suggest", onClick: () => face.adapt(s.platform, s.form), disabled: state.busy, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id: s.platform === "gongzhonghao" ? "weixin" : s.platform, size: 24 }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { children: [
+          platformLabel(s.platform, t),
+          " \xB7 ",
+          FORM_LABEL[s.form] ?? s.form
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: s.reason })
+      ] }, s.platform + s.form)) })
+    ] }),
+    assist && Object.keys(assist.platformDrafts).length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section publish-instruction", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("assistTargeted") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Input, { value: assist.instruction, placeholder: t("assistInstructionHint"), onChange: (e) => face.setInstruction(e.target.value) }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: t("assistInstructionNote") })
+      ] }),
+      Object.entries(assist.platformDrafts).map(([platform, draft]) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+        PlatformCard,
+        {
+          platform,
+          draft,
+          rule: assist.rules.find((r) => r.platform === platform && r.form === draft.form),
+          result: assist.adaptResults[platform],
+          state,
+          face,
+          t,
+          marked: assist.manualRecords.find((row) => row.platform === platform && !row.unmarkedAt),
+          marking: marking === platform,
+          markLink,
+          setMarkLink,
+          onMarkRequest: () => {
+            setMarking(platform);
+            setMarkLink("");
+          },
+          onMarkConfirm: () => {
+            face.markPublished(platform, markLink.trim() || void 0);
+            setMarking(null);
+          },
+          onMarkCancel: () => setMarking(null),
+          copied,
+          doCopy
+        },
+        platform
+      ))
+    ] })
+  ] });
+}
+function PlatformCard(props) {
+  const { platform, draft, rule, result, state, face, t, marked, marking, markLink, setMarkLink, onMarkRequest, onMarkConfirm, onMarkCancel, copied, doCopy } = props;
+  const [open, setOpen] = (0, import_react2.useState)(null);
+  const [editText, setEditText] = (0, import_react2.useState)("");
+  const iconId = platform === "gongzhonghao" ? "weixin" : platform;
+  const copyAll = () => {
+    void doCopy("all", Object.values(draft.fields).map((value) => value.text).filter((text) => text.length > 0).join("\n\n"));
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section publish-platform-version", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-section-heading", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id: iconId, size: 30 }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("h2", { children: [
+        platformLabel(platform, t),
+        " \xB7 ",
+        FORM_LABEL[draft.form] ?? draft.form
+      ] }),
+      marked ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-ok", children: t("assistMarked") }) : result && result.checks.some((check) => check.exceeded && check.level === "hard") ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-fail", children: t("assistHardExceeded") }) : result ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-ok", children: t("assistReady") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("assistDraft") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.adapt(platform, draft.form), disabled: state.busy, children: state.busy ? t("assistThinking") : t("assistRegenerate") })
+    ] }),
+    result && result.protectedFields.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-notice", children: [
+      t("assistProtected"),
+      result.protectedFields.join("\u3001")
+    ] }),
+    result && result.changes.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("details", { className: "publish-changes", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("summary", { children: t("assistChanges") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("ul", { children: result.changes.map((change, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("li", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("strong", { children: change.field }),
+        "\uFF1A",
+        change.what,
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: change.why })
+      ] }, index)) })
+    ] }),
+    result && result.warnings.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-notice", children: [
+      t("assistWarnings"),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("ul", { children: result.warnings.map((warning, index) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("li", { children: [
+        warning.field,
+        "\uFF1A",
+        warning.issue,
+        warning.quote ? `\u300C${warning.quote}\u300D` : ""
+      ] }, index)) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-fields", children: Object.entries(draft.fields).map(([field, value]) => {
+      const length = rule?.lengths.find((item) => item.field === field);
+      const check = result?.checks.find((item) => item.field === field);
+      return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-field", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-field-head", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { children: [
+            field,
+            value.edited && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-warn", children: t("assistEdited") })
+          ] }),
+          length && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "publish-count" + (check?.exceeded ? check.level === "hard" ? " hard" : " warn" : ""), children: [
+            check?.count ?? "\u2014",
+            "/",
+            length.max,
+            length.unit === "weighted" ? t("assistWeighted") : t("assistChars")
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { size: "sm", variant: "outline", onClick: () => {
+            void doCopy(field, value.text);
+          }, children: copied === field + "-ok" ? t("assistCopied") : t("assistCopy") })
+        ] }),
+        open === field ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "textarea",
+          {
+            value: editText,
+            rows: field === "body" || field === "digest" ? 10 : 3,
+            autoFocus: true,
+            onChange: (e) => setEditText(e.target.value),
+            onBlur: (e) => {
+              face.saveField(platform, draft.form, field, e.target.value);
+              setOpen(null);
+            }
+          }
+        ) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-field-text", role: "button", tabIndex: 0, onClick: () => {
+          setEditText(value.text);
+          setOpen(field);
+        }, onKeyDown: (e) => {
+          if (e.key === "Enter") {
+            setEditText(value.text);
+            setOpen(field);
+          }
+        }, children: value.text || t("assistEmptyField") })
+      ] }, field);
+    }) }),
+    rule && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-platform-actions", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("a", { className: "btn outline", href: rule.studioUrl, target: "_blank", rel: "noreferrer", children: [
+        t("assistOpenStudio"),
+        " \u2197"
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: copyAll, children: copied === "all-ok" ? t("assistCopied") : t("assistCopyAll") }),
+      marked ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.unmarkPublished(platform), disabled: state.busy, children: t("assistUnmark") }) : marking ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "publish-markrow", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Input, { value: markLink, placeholder: t("assistLinkOptional"), onChange: (e) => setMarkLink(e.target.value) }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", onClick: onMarkConfirm, disabled: state.busy, children: t("assistMarkConfirm") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: onMarkCancel, children: t("back") })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", onClick: onMarkRequest, disabled: state.busy, children: t("assistMark") }),
+      marked && !marking && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("small", { className: "publish-marked-note", children: [
+        t("assistMarkedNote"),
+        marked.markedAt.slice(0, 16).replace("T", " "),
+        marked.link ? ` \xB7 ${marked.link}` : ""
+      ] })
+    ] }),
+    rule?.notes && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { className: "publish-rule-note", children: rule.notes })
+  ] });
+}
+function DraftsList({ state, face, t }) {
+  const drafts = state.assist?.drafts ?? [];
+  const active = state.activeDraftId;
+  (0, import_react2.useEffect)(() => {
+    face.loadDrafts();
+  }, []);
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-section-heading", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("draftsTitle") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.loadDrafts, disabled: state.busy, children: t("refresh") })
+    ] }),
+    drafts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-empty", children: t("draftsEmpty") }) : drafts.map((material) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+      "div",
+      {
+        className: "publish-draft-row" + (material.draftId === active ? " picked" : ""),
+        role: "button",
+        tabIndex: 0,
+        onClick: () => face.loadDraft(material.draftId),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") face.loadDraft(material.draftId);
+        },
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("strong", { children: material.text.slice(0, 60).replace(/\n/g, " ") }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("small", { children: [
+            material.origin,
+            " \xB7 ",
+            material.kind.toUpperCase(),
+            " \xB7 ",
+            material.updatedAt.slice(0, 16).replace("T", " ")
+          ] })
+        ]
+      },
+      material.draftId
+    ))
+  ] });
+}
+
+// src/client/Page.tsx
+var import_jsx_runtime4 = require("react/jsx-runtime");
+function PublishIcon({ size }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.IconSendOutlineRegular, { size });
+}
+var TAB_KEYS = [{ key: "assist", label: "assistTab" }, { key: "drafts", label: "draftsTab" }, { key: "overview", label: "overview" }, { key: "accounts", label: "accounts" }, { key: "settings", label: "settings" }];
 function PublishPage(props) {
   const { t } = props;
   const state = props.usePublishState((s) => s);
@@ -1164,15 +1649,15 @@ function PublishPage(props) {
   const month = /* @__PURE__ */ new Date();
   const inDetail = state.view.view === "platform";
   const activeTab = inDetail ? "overview" : state.tab;
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-center", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("header", { className: "publish-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h1", { children: t("title") }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: t("description") })
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-center", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("header", { className: "publish-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("h1", { children: t("title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { children: t("description") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: props.refresh, disabled: state.busy, children: t("refresh") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: props.refresh, disabled: state.busy, children: t("refresh") })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("nav", { className: "publish-tabs", role: "tablist", "aria-label": t("title"), children: TAB_KEYS.map(({ key, label }) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("nav", { className: "publish-tabs", role: "tablist", "aria-label": t("title"), children: TAB_KEYS.map(({ key, label }) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
       "button",
       {
         type: "button",
@@ -1188,13 +1673,13 @@ function PublishPage(props) {
       },
       key
     )) }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-content", role: "tabpanel", id: "publish-panel-" + activeTab, "aria-labelledby": "publish-tab-" + activeTab, children: [
-      state.error && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-notice", role: "alert", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-content", role: "tabpanel", id: "publish-panel-" + activeTab, "aria-labelledby": "publish-tab-" + activeTab, children: [
+      state.error && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-notice", role: "alert", children: [
         state.error,
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { onClick: props.refresh, children: t("retry") })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { onClick: props.refresh, children: t("retry") })
       ] }),
-      state.data && !state.data.publishingEnabled && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "publish-notice", children: t("paused") }),
-      inDetail ? state.data && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformDetail, { state, face: props, t, month, data: state.data }) : activeTab === "overview" ? state.data && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Overview, { state, face: props, t, month, data: state.data }) : activeTab === "accounts" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AccountsSection, { state, settingsState, t, face: props }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsSection, { settingsState, t, face: props, ledgerPath: state.data?.ledgerPath })
+      state.data && !state.data.publishingEnabled && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: "publish-notice", children: t("paused") }),
+      inDetail ? state.data && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(PlatformDetail, { state, face: props, t, month, data: state.data }) : activeTab === "assist" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(Assistant, { state, face: props, t }) : activeTab === "drafts" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(DraftsList, { state, face: props, t }) : activeTab === "overview" ? state.data && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(Overview, { state, face: props, t, month, data: state.data }) : activeTab === "accounts" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(AccountsSection, { state, settingsState, t, face: props }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(SettingsSection, { settingsState, t, face: props, ledgerPath: state.data?.ledgerPath })
     ] })
   ] });
 }
@@ -1212,7 +1697,7 @@ function Overview({ state, face, t, month, data }) {
   const monthEntries = data.entries.filter((e) => recordDay(e).startsWith(monthPrefix));
   const legend = [...new Set(monthEntries.map((e) => e.request.platform))].map((id) => ({ color: platformMeta(id).bg, label: platformLabel(id, t) }));
   const dayEntries = state.selectedDate ? data.entries.filter((e) => recordDay(e) === state.selectedDate) : [];
-  const drag = (0, import_react2.useRef)(null);
+  const drag = (0, import_react3.useRef)(null);
   const onDown = (id) => (event) => {
     drag.current = id;
     event.preventDefault();
@@ -1238,26 +1723,26 @@ function Overview({ state, face, t, month, data }) {
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-statstrip", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: todayCount }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("todayPublished") })
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-statstrip", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: todayCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("todayPublished") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: monthCount }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("monthPublished") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: monthCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("monthPublished") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: unknownCount }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("pendingCount") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: unknownCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("pendingCount") })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: scheduledCount }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("scheduledCount") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: scheduledCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("scheduledCount") })
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-cards", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-cards", children: [
       orderIds.map((id) => {
         const spec = data.platforms.find((p) => p.id === id);
         const accounts = data.configuredAccounts.filter((a) => a.platform === id);
@@ -1267,131 +1752,131 @@ function Overview({ state, face, t, month, data }) {
         const platformMonth = platformEntries.filter((e) => recordDay(e).startsWith(monthPrefix) && attempted(e.status));
         const platformUnknown = platformEntries.filter((e) => e.status === "unknown").length;
         const platformScheduled = platformEntries.filter((e) => e.status === "scheduled").length;
-        const badge = spec.blocked ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("blocked") }) : spec.acceptance === "pending" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-warn", children: t("pendingAcceptance") }) : !accounts.length ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("notConfigured") }) : invalid ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-unknown", children: t("invalid") }) : checks.length ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-ok", children: t("valid") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("notChecked") });
-        return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard", "data-platform": id, children: [
-          !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "publish-drag", "aria-hidden": true, onPointerDown: onDown(id), children: "\u283F" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard-head", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id, size: 34 }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pname", children: platformLabel(id, t) }),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pmeta", children: platformSummary(spec) })
+        const badge = spec.blocked ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-muted", children: t("blocked") }) : spec.acceptance === "pending" ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-warn", children: t("pendingAcceptance") }) : !accounts.length ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-muted", children: t("notConfigured") }) : invalid ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-unknown", children: t("invalid") }) : checks.length ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-ok", children: t("valid") }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip c-muted", children: t("notChecked") });
+        return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-pcard", "data-platform": id, children: [
+          !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "publish-drag", "aria-hidden": true, onPointerDown: onDown(id), children: "\u283F" }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-pcard-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(PlatformIcon, { id, size: 34 }),
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-pname", children: platformLabel(id, t) }),
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-pmeta", children: platformSummary(spec) })
             ] }),
             badge
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-accs", children: accounts.map((a) => {
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-accs", children: accounts.map((a) => {
             const st = checks.find((s) => s.account === a.name);
-            return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "publish-acc", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("i", { className: "dot", style: { background: st?.status === "invalid" ? "#d97917" : "#0d8a55" } }),
+            return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "publish-acc", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "dot", style: { background: st?.status === "invalid" ? "#d97917" : "#0d8a55" } }),
               a.name
             ] }, a.name);
           }) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-nums", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformMonth.length }),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("monthPublished") })
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-nums", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: platformMonth.length }),
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("monthPublished") })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformUnknown }),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("pendingCount") })
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: platformUnknown }),
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("pendingCount") })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformScheduled }),
-              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("scheduledCount") })
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("b", { children: platformScheduled }),
+              /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: t("scheduledCount") })
             ] })
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-minilist", children: platformEntries.slice(0, 3).map((entry) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-minilist-row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "t", children: entry.request.title }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip publish-status publish-status-" + entry.status, children: statusLabel(entry.status, t) }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "d", children: recordDay(entry).slice(5) })
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-minilist", children: platformEntries.slice(0, 3).map((entry) => /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-minilist-row", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "t", children: entry.request.title }),
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "chip publish-status publish-status-" + entry.status, children: statusLabel(entry.status, t) }),
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "d", children: recordDay(entry).slice(5) })
           ] }, entry.prepareId)) }),
-          spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-na", children: spec.blocked }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-actions", children: [
-            !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", onClick: () => face.openPlatform(id), children: t("newPost") }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.openPlatform(id), children: t("viewPlatform") }),
-            invalid && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: t("checkAccounts") }),
-            !accounts.length && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.setTab("accounts"), children: t("addAccount") })
+          spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-na", children: spec.blocked }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-actions", children: [
+            !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "primary", onClick: () => face.openPlatform(id), children: t("newPost") }),
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: () => face.openPlatform(id), children: t("viewPlatform") }),
+            invalid && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: t("checkAccounts") }),
+            !accounts.length && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: () => face.setTab("accounts"), children: t("addAccount") })
           ] })
         ] }, id);
       }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard publish-more-card", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard-head", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "publish-pico", style: { background: "#e3e5e8", color: "#646a73", fontSize: 16 }, children: "\uFF0B" }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pname", children: t("morePlatforms") }),
-            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pmeta", children: t("morePlatformsHint") })
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-pcard publish-more-card", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-pcard-head", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "publish-pico", style: { background: "#e3e5e8", color: "#646a73", fontSize: 16 }, children: "\uFF0B" }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-pname", children: t("morePlatforms") }),
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-pmeta", children: t("morePlatformsHint") })
           ] })
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-actions", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.toggleMore, children: t("openMorePanel") }) })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-actions", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: face.toggleMore, children: t("openMorePanel") }) })
       ] })
     ] }),
-    state.moreOpen && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-morepanel", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h3", { children: t("morePlatforms") }),
+    state.moreOpen && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-morepanel", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("h3", { children: t("morePlatforms") }),
       data.platforms.map((spec) => {
         const inHome = data.homeCards.includes(spec.id);
-        return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-more-row", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id: spec.id, size: 24 }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "nm", children: platformLabel(spec.id, t) }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "st", children: [
+        return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-more-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(PlatformIcon, { id: spec.id, size: 24 }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "nm", children: platformLabel(spec.id, t) }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "st", children: [
             platformSummary(spec),
             spec.acceptance === "pending" ? " \xB7 " + t("pendingAcceptance") : ""
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { size: "sm", variant: "outline", onClick: () => inHome ? face.removeMore(spec.id) : face.addMore(spec.id), children: inHome ? t("removeFromHome") : t("addToHome") })
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { size: "sm", variant: "outline", onClick: () => inHome ? face.removeMore(spec.id) : face.addMore(spec.id), children: inHome ? t("removeFromHome") : t("addToHome") })
         ] }, spec.id);
       })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Calendar, { entries: monthEntries, colorFor: (e) => platformMeta(e.request.platform).bg, selected: state.selectedDate, onSelect: face.selectDate, month, title: t("globalCalendar"), legend, t }),
-    state.selectedDate && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("h2", { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(Calendar, { entries: monthEntries, colorFor: (e) => platformMeta(e.request.platform).bg, selected: state.selectedDate, onSelect: face.selectDate, month, title: t("globalCalendar"), legend, t }),
+    state.selectedDate && /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("section", { className: "publish-section", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("h2", { children: [
         t("dayRecords"),
         " \xB7 ",
         state.selectedDate
       ] }),
-      dayEntries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-empty", children: t("empty") }) : dayEntries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(RecordRow, { entry, t }, entry.prepareId))
+      dayEntries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-empty", children: t("empty") }) : dayEntries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(RecordRow, { entry, t }, entry.prepareId))
     ] })
   ] });
 }
 function AccountsSection({ state, settingsState, t, face }) {
   const data = state.data;
   const configured = data?.configuredAccounts ?? [];
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-section-heading", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("accounts") }),
-      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: state.busy ? t("checking") : t("checkAccounts") })
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-section-heading", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("h2", { children: t("accounts") }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: state.busy ? t("checking") : t("checkAccounts") })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: t("accountHelp") }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-account-status", children: configured.map((a) => {
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { children: t("accountHelp") }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "publish-account-status", children: configured.map((a) => {
       const status = state.accounts?.find((s) => s.platform === a.platform && s.account === a.name);
-      return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("strong", { children: [
+      return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("strong", { children: [
           platformLabel(a.platform, t),
           " \xB7 ",
           a.name
         ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: statusLabel(status?.status ?? "", t) }),
-        status?.detail && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: status.detail })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { children: statusLabel(status?.status ?? "", t) }),
+        status?.detail && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("small", { children: status.detail })
       ] }, a.platform + "/" + a.name);
     }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard, onlyAccounts: true })
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard, onlyAccounts: true })
   ] });
 }
 function SettingsSection({ settingsState, t, face, ledgerPath }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: t("ledger") }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("code", { className: "publish-ledger", children: ledgerPath })
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("small", { children: t("ledger") }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("code", { className: "publish-ledger", children: ledgerPath })
   ] });
 }
 function PublishSettings(props) {
   const state = props.usePublishSettings((s) => s);
   if (props.view === "summary") return props.t("summary");
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-center publish-settings-card", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: props.openCenter, children: props.t("title") }),
-    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state, t: props.t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard })
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "publish-center publish-settings-card", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(import_dsh_client_ui_primitives5.Button, { variant: "outline", onClick: props.openCenter, children: props.t("title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(SettingsContent, { state, t: props.t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard })
   ] });
 }
 
 // src/client/client.css
-var client_default = ".publish-center{display:flex;flex-direction:column;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.6}\n.publish-center h1,.publish-center h2,.publish-center h3,.publish-center p{margin:0}\n.publish-center h1{font-size:22px;font-weight:500;line-height:30px}\n.publish-center h2{font-size:16px;font-weight:500}.publish-center h3,.publish-center strong{font-weight:500}\n.publish-center p,.publish-center small{color:var(--dsw-alias-label-secondary)}\n.publish-center small{display:block;font-size:12px}\n.publish-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:28px 32px 20px;flex-shrink:0}\n[data-platform=darwin] .publish-header{padding-top:calc(28px + var(--dsh-frame-top-clearance,0px))}\n.publish-tabs{display:flex;gap:20px;padding:0 32px;border-bottom:.5px solid var(--dsw-alias-border-l3);flex-shrink:0}\n.publish-tabs button{background:transparent;border:0;border-bottom:2px solid transparent;padding:12px 0;cursor:pointer;font:inherit;color:var(--dsw-alias-label-secondary);white-space:nowrap}\n.publish-tabs button[aria-selected=true]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-label-primary)}\n.publish-content{padding:24px 32px;display:flex;flex-direction:column;gap:16px;max-width:1400px;width:100%;box-sizing:border-box;overflow:auto;flex:1;min-height:0}\n.publish-editor{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}\n.publish-section{display:flex;flex-direction:column;gap:18px;min-width:0;padding:24px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,12px)}\n.publish-section-heading,.publish-actions{display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-center label{display:flex;flex-direction:column;gap:8px;font-size:13px;min-width:0}\n.publish-center textarea,.publish-center select,.publish-center input[type=datetime-local]{box-sizing:border-box;width:100%;min-width:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);font:inherit;line-height:1.6;color:inherit;background:var(--dsw-alias-bg-base)}\n.publish-center textarea{resize:vertical}.publish-center button:focus-visible,.publish-center input:focus-visible,.publish-center select:focus-visible,.publish-center textarea:focus-visible,.publish-center summary:focus-visible{outline:2px solid var(--dsw-alias-button-primary-bg,var(--dsw-alias-label-primary));outline-offset:3px}\n.publish-row{display:flex;gap:12px;flex-wrap:wrap}.publish-row>label{flex:1;min-width:130px}\n.publish-switch{flex-direction:row!important;align-items:center;justify-content:space-between;gap:20px;padding:10px 0}\n.publish-upload{padding:20px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);cursor:pointer}\n.publish-upload input{font-size:12px}.publish-files{padding:0;margin:0;list-style:none}.publish-files li{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l3);padding:6px 0}.publish-files span{overflow-wrap:anywhere;min-width:0}\n.publish-preview{position:sticky;top:0;gap:16px}.publish-preview-meta{font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-body{white-space:pre-wrap;overflow-wrap:anywhere}.publish-thumbnails{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.publish-thumbnails>div:first-child{grid-column:1/-1}.publish-thumbnails img,.publish-thumbnails video{display:block;width:100%;max-height:320px;object-fit:contain;border-radius:var(--dsw-radius-sm,8px)}.publish-empty-media,.publish-media-label{padding:40px 14px;text-align:center;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.publish-notice{padding:12px 16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-review{display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px;font-size:13px;margin:0}.publish-review dt{color:var(--dsw-alias-label-secondary)}.publish-review dd{margin:0;overflow-wrap:anywhere}\n.publish-table-scroll{overflow:auto}.publish-center table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}.publish-center th{font-weight:500;color:var(--dsw-alias-label-secondary)}.publish-center td,.publish-center th{padding:14px 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);vertical-align:top}.publish-center td{min-width:100px}.publish-center details p{max-width:360px;overflow-wrap:anywhere}.publish-center summary{cursor:pointer}.publish-status{display:inline-flex;padding:2px 8px;border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);white-space:nowrap}.publish-status-unknown,.publish-status-submitted{border:.5px solid var(--dsw-alias-border-l3)}\n.publish-empty{padding:64px 12px;text-align:center;color:var(--dsw-alias-label-secondary)}\n.publish-account-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.publish-account-status>div{display:flex;flex-direction:column;gap:8px;padding:16px;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px)}\n.publish-account-edit{display:flex;gap:12px;align-items:end;margin-bottom:14px;flex-wrap:wrap}.publish-account-edit label{flex:1;min-width:140px}.publish-settings-card{padding:20px;box-sizing:border-box;gap:20px}.publish-ledger{overflow-wrap:anywhere;font-size:12px}\n@media(max-width:1000px){.publish-editor{grid-template-columns:minmax(0,1fr)}.publish-preview{position:static}.publish-thumbnails{grid-template-columns:repeat(3,minmax(0,1fr))}.publish-thumbnails>div:first-child{grid-column:auto}}\n@media(max-width:520px){.publish-header{padding:20px 16px 12px}.publish-tabs{padding:0 16px;gap:16px;overflow:auto}.publish-content{padding:16px}.publish-section{padding:16px}.publish-row{flex-direction:column}.publish-header h1{font-size:20px}}\n@media(prefers-reduced-motion:reduce){.publish-center *{scroll-behavior:auto!important;transition:none!important}}\n/* ===== v0.3 \u5E73\u53F0\u4F18\u5148\uFF1A\u603B\u89C8\u5361\u7247\u3001\u66F4\u591A\u5E73\u53F0\u3001\u65E5\u5386\u3001\u5E73\u53F0\u8BE6\u60C5 ===== */\n.publish-center .chip{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;font-size:12px;white-space:nowrap}\n.publish-center .c-ok{background:#e8f7ef;color:#0d8a55}.publish-center .c-sub{background:#e8efff;color:#2a5bd7}\n.publish-center .c-unknown{background:#fdf2e2;color:#b25e09}.publish-center .c-warn{background:#fdf2e2;color:#b25e09}\n.publish-center .c-sched{background:#f3ecfb;color:#7a3db8}.publish-center .c-fail{background:#feecea;color:#d92d20}\n.publish-center .c-muted{background:#f2f3f5;color:#646a73}\n.publish-statstrip{display:flex;gap:12px;margin-bottom:16px}\n.publish-stat{flex:1;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:10px;padding:12px 16px}\n.publish-stat b{display:block;font-size:22px;font-weight:600}.publish-stat span{font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}\n.publish-pcard{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;position:relative}\n.publish-pcard-head{display:flex;align-items:center;gap:10px}\n.publish-pico{width:34px;height:34px;border-radius:9px;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:none}\n.publish-pname{font-size:15px;font-weight:600}.publish-pmeta{font-size:11px;color:var(--dsw-alias-label-secondary)}\n.publish-pcard-head .chip{margin-left:auto}\n.publish-drag{position:absolute;top:10px;right:12px;color:var(--dsw-alias-label-secondary);opacity:.5;letter-spacing:2px;cursor:grab;touch-action:none}\n.publish-drag:active{cursor:grabbing;opacity:1}\n.publish-accs{display:flex;gap:8px;flex-wrap:wrap}\n.publish-acc{font-size:11px;padding:3px 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-base);display:inline-flex;align-items:center}\n.publish-acc .dot{margin-right:5px}\n.publish-nums{display:flex;gap:22px;font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-nums b{display:block;font-size:16px;color:var(--dsw-alias-label-primary);font-weight:600}\n.publish-minilist{display:flex;flex-direction:column;gap:6px}\n.publish-minilist-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 10px;background:var(--dsw-alias-bg-base);border-radius:8px}\n.publish-minilist-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.publish-minilist-row .d{color:var(--dsw-alias-label-secondary);font-size:11px;flex:none}\n.publish-na{font-size:11.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;border:.5px dashed var(--dsw-alias-border-l3)}\n.publish-actions{display:flex;gap:10px;flex-wrap:wrap}\n.publish-more-card{border-style:dashed}\n.publish-morepanel{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\n.publish-morepanel h3{font-size:13.5px;font-weight:600;margin-bottom:10px}\n.publish-more-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:6px;font-size:12.5px}\n.publish-more-row .nm{width:76px;font-weight:500}\n.publish-more-row .st{flex:1;color:var(--dsw-alias-label-secondary);font-size:11.5px}\n.publish-more-row .publish-pico{width:24px;height:24px;border-radius:6px;font-size:11px}\n.publish-cal{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\n.publish-cal-head{display:flex;align-items:center;gap:12px;font-size:13px;font-weight:600;margin-bottom:10px;flex-wrap:wrap}\n.publish-cal-legend{margin-left:auto;display:flex;gap:12px;font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:400;flex-wrap:wrap}\n.publish-cal-legend .dot{margin-right:5px}\n.publish-calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}\n.publish-wd{text-align:center;font-size:11px;color:var(--dsw-alias-label-secondary);padding:2px 0}\n.publish-cell{min-height:42px;background:var(--dsw-alias-bg-base);border:.5px solid transparent;border-radius:7px;padding:4px 6px;font-size:11px;position:relative;text-align:left;font:inherit;color:inherit;cursor:pointer}\n.publish-cell:hover{border-color:var(--dsw-alias-border-l3)}\n.publish-cell.static{cursor:default}\n.publish-cell.off{background:transparent}\n.publish-cell.today{border-color:#3370ff}\n.publish-cell.picked{background:#e8efff}\n.publish-cell-day{color:var(--dsw-alias-label-secondary)}\n.publish-cell.today .publish-cell-day{color:#3370ff;font-weight:600}\n.publish-ev{display:flex;gap:3px;margin-top:3px;min-height:7px}\n.publish-ev i{width:7px;height:7px;border-radius:2px;display:block}\n.publish-cnt{position:absolute;right:5px;bottom:3px;font-size:10px;color:var(--dsw-alias-label-secondary)}\n.publish-detail-head{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}\n.publish-who{display:flex;align-items:center;gap:10px;font-size:15px}\n.publish-who select{width:auto;padding:6px 10px}\n.publish-detail-acts{margin-left:auto;display:flex;gap:10px}\n.publish-detail-cols{display:flex;gap:14px;align-items:flex-start;margin-top:14px}\n.publish-records{flex:1;min-width:0}\n.publish-side{width:380px;flex:none}\n.publish-side .publish-cal{margin-top:0}\n.publish-rec{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px}\n.publish-rec-l1{display:flex;align-items:center;gap:8px}\n.publish-rec-t{flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.publish-rec-l2{font-size:11px;color:var(--dsw-alias-label-secondary);display:flex;gap:10px;flex-wrap:wrap}\n.publish-rec details{font-size:11.5px}.publish-rec details p{margin:4px 0;overflow-wrap:anywhere}\n.publish-note-flag{color:#b25e09;background:#fdf2e2;border-radius:6px;padding:1px 7px;display:inline-block}\n.publish-kindtabs{display:flex;gap:8px}\n.publish-kindtabs button{background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l3);border-radius:999px;padding:6px 16px;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary);cursor:pointer}\n.publish-kindtabs button[aria-selected=true]{background:#3370ff;border-color:#3370ff;color:#fff}\n.publish-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}\n@media(max-width:1000px){.publish-detail-cols{flex-direction:column}.publish-side{width:auto}}\n@media(max-width:520px){.publish-cards{grid-template-columns:1fr}.publish-statstrip{flex-wrap:wrap}.publish-stat{min-width:calc(50% - 6px)}}\n/* ===== v0.3 \u6279\u6B21 2\uFF1A\u6570\u636E\u4E2D\u5FC3 ===== */\n.publish-tiles{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px}\n.publish-tiles .tile{background:var(--dsw-alias-bg-base);border-radius:9px;padding:10px 12px}\n.publish-tiles .tile b{display:block;font-size:19px;font-weight:600}\n.publish-tiles .tile span{font-size:11px;color:var(--dsw-alias-label-secondary)}\n.publish-metric-row{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px;flex-wrap:wrap}\n.publish-metric-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}\n.publish-metric-main strong{font-size:12.5px;font-weight:500;overflow-wrap:anywhere}\n.publish-metric-main small,.publish-metric-acts{font-size:11px;color:var(--dsw-alias-label-secondary)}\n.publish-metric-acts{display:flex;gap:6px;align-items:center}\n.publish-notes-picker{flex-basis:100%;display:flex;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:9px;padding:8px}\n.publish-notes-row{display:flex;align-items:center;gap:8px;font-size:12px}\n.publish-notes-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.publish-refreshrow{margin-top:10px;display:flex;justify-content:flex-end}\n.publish-side .publish-sidebox+.publish-sidebox,.publish-side .publish-sidebox+.publish-cal{margin-top:14px}\n";
+var client_default = ".publish-center{display:flex;flex-direction:column;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.6}\r\n.publish-center h1,.publish-center h2,.publish-center h3,.publish-center p{margin:0}\r\n.publish-center h1{font-size:22px;font-weight:500;line-height:30px}\r\n.publish-center h2{font-size:16px;font-weight:500}.publish-center h3,.publish-center strong{font-weight:500}\r\n.publish-center p,.publish-center small{color:var(--dsw-alias-label-secondary)}\r\n.publish-center small{display:block;font-size:12px}\r\n.publish-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:28px 32px 20px;flex-shrink:0}\r\n[data-platform=darwin] .publish-header{padding-top:calc(28px + var(--dsh-frame-top-clearance,0px))}\r\n.publish-tabs{display:flex;gap:20px;padding:0 32px;border-bottom:.5px solid var(--dsw-alias-border-l3);flex-shrink:0}\r\n.publish-tabs button{background:transparent;border:0;border-bottom:2px solid transparent;padding:12px 0;cursor:pointer;font:inherit;color:var(--dsw-alias-label-secondary);white-space:nowrap}\r\n.publish-tabs button[aria-selected=true]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-label-primary)}\r\n.publish-content{padding:24px 32px;display:flex;flex-direction:column;gap:16px;max-width:1400px;width:100%;box-sizing:border-box;overflow:auto;flex:1;min-height:0}\r\n.publish-editor{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}\r\n.publish-section{display:flex;flex-direction:column;gap:18px;min-width:0;padding:24px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,12px)}\r\n.publish-section-heading,.publish-actions{display:flex;gap:12px;align-items:center;justify-content:space-between}\r\n.publish-center label{display:flex;flex-direction:column;gap:8px;font-size:13px;min-width:0}\r\n.publish-center textarea,.publish-center select,.publish-center input[type=datetime-local]{box-sizing:border-box;width:100%;min-width:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);font:inherit;line-height:1.6;color:inherit;background:var(--dsw-alias-bg-base)}\r\n.publish-center textarea{resize:vertical}.publish-center button:focus-visible,.publish-center input:focus-visible,.publish-center select:focus-visible,.publish-center textarea:focus-visible,.publish-center summary:focus-visible{outline:2px solid var(--dsw-alias-button-primary-bg,var(--dsw-alias-label-primary));outline-offset:3px}\r\n.publish-row{display:flex;gap:12px;flex-wrap:wrap}.publish-row>label{flex:1;min-width:130px}\r\n.publish-switch{flex-direction:row!important;align-items:center;justify-content:space-between;gap:20px;padding:10px 0}\r\n.publish-upload{padding:20px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);cursor:pointer}\r\n.publish-upload input{font-size:12px}.publish-files{padding:0;margin:0;list-style:none}.publish-files li{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l3);padding:6px 0}.publish-files span{overflow-wrap:anywhere;min-width:0}\r\n.publish-preview{position:sticky;top:0;gap:16px}.publish-preview-meta{font-size:12px;color:var(--dsw-alias-label-secondary)}\r\n.publish-body{white-space:pre-wrap;overflow-wrap:anywhere}.publish-thumbnails{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.publish-thumbnails>div:first-child{grid-column:1/-1}.publish-thumbnails img,.publish-thumbnails video{display:block;width:100%;max-height:320px;object-fit:contain;border-radius:var(--dsw-radius-sm,8px)}.publish-empty-media,.publish-media-label{padding:40px 14px;text-align:center;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\r\n.publish-notice{padding:12px 16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);display:flex;gap:12px;align-items:center;justify-content:space-between}\r\n.publish-review{display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px;font-size:13px;margin:0}.publish-review dt{color:var(--dsw-alias-label-secondary)}.publish-review dd{margin:0;overflow-wrap:anywhere}\r\n.publish-table-scroll{overflow:auto}.publish-center table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}.publish-center th{font-weight:500;color:var(--dsw-alias-label-secondary)}.publish-center td,.publish-center th{padding:14px 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);vertical-align:top}.publish-center td{min-width:100px}.publish-center details p{max-width:360px;overflow-wrap:anywhere}.publish-center summary{cursor:pointer}.publish-status{display:inline-flex;padding:2px 8px;border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);white-space:nowrap}.publish-status-unknown,.publish-status-submitted{border:.5px solid var(--dsw-alias-border-l3)}\r\n.publish-empty{padding:64px 12px;text-align:center;color:var(--dsw-alias-label-secondary)}\r\n.publish-account-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.publish-account-status>div{display:flex;flex-direction:column;gap:8px;padding:16px;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px)}\r\n.publish-account-edit{display:flex;gap:12px;align-items:end;margin-bottom:14px;flex-wrap:wrap}.publish-account-edit label{flex:1;min-width:140px}.publish-settings-card{padding:20px;box-sizing:border-box;gap:20px}.publish-ledger{overflow-wrap:anywhere;font-size:12px}\r\n@media(max-width:1000px){.publish-editor{grid-template-columns:minmax(0,1fr)}.publish-preview{position:static}.publish-thumbnails{grid-template-columns:repeat(3,minmax(0,1fr))}.publish-thumbnails>div:first-child{grid-column:auto}}\r\n@media(max-width:520px){.publish-header{padding:20px 16px 12px}.publish-tabs{padding:0 16px;gap:16px;overflow:auto}.publish-content{padding:16px}.publish-section{padding:16px}.publish-row{flex-direction:column}.publish-header h1{font-size:20px}}\r\n@media(prefers-reduced-motion:reduce){.publish-center *{scroll-behavior:auto!important;transition:none!important}}\r\n/* ===== v0.3 \u5E73\u53F0\u4F18\u5148\uFF1A\u603B\u89C8\u5361\u7247\u3001\u66F4\u591A\u5E73\u53F0\u3001\u65E5\u5386\u3001\u5E73\u53F0\u8BE6\u60C5 ===== */\r\n.publish-center .chip{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;font-size:12px;white-space:nowrap}\r\n.publish-center .c-ok{background:#e8f7ef;color:#0d8a55}.publish-center .c-sub{background:#e8efff;color:#2a5bd7}\r\n.publish-center .c-unknown{background:#fdf2e2;color:#b25e09}.publish-center .c-warn{background:#fdf2e2;color:#b25e09}\r\n.publish-center .c-sched{background:#f3ecfb;color:#7a3db8}.publish-center .c-fail{background:#feecea;color:#d92d20}\r\n.publish-center .c-muted{background:#f2f3f5;color:#646a73}\r\n.publish-statstrip{display:flex;gap:12px;margin-bottom:16px}\r\n.publish-stat{flex:1;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:10px;padding:12px 16px}\r\n.publish-stat b{display:block;font-size:22px;font-weight:600}.publish-stat span{font-size:12px;color:var(--dsw-alias-label-secondary)}\r\n.publish-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}\r\n.publish-pcard{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;position:relative}\r\n.publish-pcard-head{display:flex;align-items:center;gap:10px}\r\n.publish-pico{width:34px;height:34px;border-radius:9px;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:none}\r\n.publish-pname{font-size:15px;font-weight:600}.publish-pmeta{font-size:11px;color:var(--dsw-alias-label-secondary)}\r\n.publish-pcard-head .chip{margin-left:auto}\r\n.publish-drag{position:absolute;top:10px;right:12px;color:var(--dsw-alias-label-secondary);opacity:.5;letter-spacing:2px;cursor:grab;touch-action:none}\r\n.publish-drag:active{cursor:grabbing;opacity:1}\r\n.publish-accs{display:flex;gap:8px;flex-wrap:wrap}\r\n.publish-acc{font-size:11px;padding:3px 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-base);display:inline-flex;align-items:center}\r\n.publish-acc .dot{margin-right:5px}\r\n.publish-nums{display:flex;gap:22px;font-size:12px;color:var(--dsw-alias-label-secondary)}\r\n.publish-nums b{display:block;font-size:16px;color:var(--dsw-alias-label-primary);font-weight:600}\r\n.publish-minilist{display:flex;flex-direction:column;gap:6px}\r\n.publish-minilist-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 10px;background:var(--dsw-alias-bg-base);border-radius:8px}\r\n.publish-minilist-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\r\n.publish-minilist-row .d{color:var(--dsw-alias-label-secondary);font-size:11px;flex:none}\r\n.publish-na{font-size:11.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;border:.5px dashed var(--dsw-alias-border-l3)}\r\n.publish-actions{display:flex;gap:10px;flex-wrap:wrap}\r\n.publish-more-card{border-style:dashed}\r\n.publish-morepanel{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\r\n.publish-morepanel h3{font-size:13.5px;font-weight:600;margin-bottom:10px}\r\n.publish-more-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:6px;font-size:12.5px}\r\n.publish-more-row .nm{width:76px;font-weight:500}\r\n.publish-more-row .st{flex:1;color:var(--dsw-alias-label-secondary);font-size:11.5px}\r\n.publish-more-row .publish-pico{width:24px;height:24px;border-radius:6px;font-size:11px}\r\n.publish-cal{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\r\n.publish-cal-head{display:flex;align-items:center;gap:12px;font-size:13px;font-weight:600;margin-bottom:10px;flex-wrap:wrap}\r\n.publish-cal-legend{margin-left:auto;display:flex;gap:12px;font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:400;flex-wrap:wrap}\r\n.publish-cal-legend .dot{margin-right:5px}\r\n.publish-calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}\r\n.publish-wd{text-align:center;font-size:11px;color:var(--dsw-alias-label-secondary);padding:2px 0}\r\n.publish-cell{min-height:42px;background:var(--dsw-alias-bg-base);border:.5px solid transparent;border-radius:7px;padding:4px 6px;font-size:11px;position:relative;text-align:left;font:inherit;color:inherit;cursor:pointer}\r\n.publish-cell:hover{border-color:var(--dsw-alias-border-l3)}\r\n.publish-cell.static{cursor:default}\r\n.publish-cell.off{background:transparent}\r\n.publish-cell.today{border-color:#3370ff}\r\n.publish-cell.picked{background:#e8efff}\r\n.publish-cell-day{color:var(--dsw-alias-label-secondary)}\r\n.publish-cell.today .publish-cell-day{color:#3370ff;font-weight:600}\r\n.publish-ev{display:flex;gap:3px;margin-top:3px;min-height:7px}\r\n.publish-ev i{width:7px;height:7px;border-radius:2px;display:block}\r\n.publish-cnt{position:absolute;right:5px;bottom:3px;font-size:10px;color:var(--dsw-alias-label-secondary)}\r\n.publish-detail-head{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}\r\n.publish-who{display:flex;align-items:center;gap:10px;font-size:15px}\r\n.publish-who select{width:auto;padding:6px 10px}\r\n.publish-detail-acts{margin-left:auto;display:flex;gap:10px}\r\n.publish-detail-cols{display:flex;gap:14px;align-items:flex-start;margin-top:14px}\r\n.publish-records{flex:1;min-width:0}\r\n.publish-side{width:380px;flex:none}\r\n.publish-side .publish-cal{margin-top:0}\r\n.publish-rec{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px}\r\n.publish-rec-l1{display:flex;align-items:center;gap:8px}\r\n.publish-rec-t{flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\r\n.publish-rec-l2{font-size:11px;color:var(--dsw-alias-label-secondary);display:flex;gap:10px;flex-wrap:wrap}\r\n.publish-rec details{font-size:11.5px}.publish-rec details p{margin:4px 0;overflow-wrap:anywhere}\r\n.publish-note-flag{color:#b25e09;background:#fdf2e2;border-radius:6px;padding:1px 7px;display:inline-block}\r\n.publish-kindtabs{display:flex;gap:8px}\r\n.publish-kindtabs button{background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l3);border-radius:999px;padding:6px 16px;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary);cursor:pointer}\r\n.publish-kindtabs button[aria-selected=true]{background:#3370ff;border-color:#3370ff;color:#fff}\r\n.publish-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}\r\n@media(max-width:1000px){.publish-detail-cols{flex-direction:column}.publish-side{width:auto}}\r\n@media(max-width:520px){.publish-cards{grid-template-columns:1fr}.publish-statstrip{flex-wrap:wrap}.publish-stat{min-width:calc(50% - 6px)}}\r\n/* ===== v0.3 \u6279\u6B21 2\uFF1A\u6570\u636E\u4E2D\u5FC3 ===== */\r\n.publish-tiles{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px}\r\n.publish-tiles .tile{background:var(--dsw-alias-bg-base);border-radius:9px;padding:10px 12px}\r\n.publish-tiles .tile b{display:block;font-size:19px;font-weight:600}\r\n.publish-tiles .tile span{font-size:11px;color:var(--dsw-alias-label-secondary)}\r\n.publish-metric-row{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px;flex-wrap:wrap}\r\n.publish-metric-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}\r\n.publish-metric-main strong{font-size:12.5px;font-weight:500;overflow-wrap:anywhere}\r\n.publish-metric-main small,.publish-metric-acts{font-size:11px;color:var(--dsw-alias-label-secondary)}\r\n.publish-metric-acts{display:flex;gap:6px;align-items:center}\r\n.publish-notes-picker{flex-basis:100%;display:flex;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:9px;padding:8px}\r\n.publish-notes-row{display:flex;align-items:center;gap:8px;font-size:12px}\r\n.publish-notes-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\r\n.publish-refreshrow{margin-top:10px;display:flex;justify-content:flex-end}\r\n.publish-side .publish-sidebox+.publish-sidebox,.publish-side .publish-sidebox+.publish-cal{margin-top:14px}\r\n/* ===== v0.4 \u667A\u80FD\u53D1\u5E03\u52A9\u624B ===== */\r\n.publish-assist-entry textarea{width:100%;box-sizing:border-box}\r\n.publish-assist-entryrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}\r\n.publish-assist-entryrow input[type=text]{min-width:140px}\r\n.publish-material-pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow:auto;background:var(--dsw-alias-bg-base);border-radius:8px;padding:12px;font-size:12.5px}\r\n.publish-assist-audience{color:var(--dsw-alias-label-secondary)}\r\n.publish-facts{padding-left:18px;display:flex;flex-direction:column;gap:6px;font-size:12.5px}\r\n.publish-facts blockquote{margin:2px 0 0;padding:4px 10px;border-left:2px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-secondary)}\r\n.publish-suggest-row{display:flex;gap:10px;flex-wrap:wrap}\r\n.publish-suggest{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l3);border-radius:10px;padding:10px 14px;cursor:pointer;font:inherit;text-align:left}\r\n.publish-suggest:hover{border-color:#3370ff}\r\n.publish-suggest small{color:var(--dsw-alias-label-secondary);font-size:11px}\r\n.publish-instruction input{width:100%}\r\n.publish-platform-version .publish-changes ul,.publish-notice ul{padding-left:16px;font-size:12px;margin:6px 0}\r\n.publish-changes li,.publish-notice li{margin-bottom:4px}\r\n.publish-changes small{display:block;color:var(--dsw-alias-label-secondary)}\r\n.publish-fields{display:flex;flex-direction:column;gap:12px}\r\n.publish-field-head{display:flex;align-items:center;gap:10px;margin-bottom:4px}\r\n.publish-field-head label{font-size:12.5px;font-weight:500;color:var(--dsw-alias-label-secondary)}\r\n.publish-count{font-size:11.5px;color:var(--dsw-alias-label-secondary)}\r\n.publish-count.warn{color:#b25e09}.publish-count.hard{color:#d92d20;font-weight:600}\r\n.publish-field-text{background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;padding:10px 12px;font-size:13.5px;white-space:pre-wrap;overflow-wrap:anywhere;min-height:40px;cursor:text}\r\n.publish-field-text:hover{border-color:#3370ff}\r\n.publish-field textarea{width:100%;box-sizing:border-box}\r\n.publish-platform-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}\r\n.publish-platform-actions .btn.outline{display:inline-flex;align-items:center;font-size:12.5px;padding:7px 14px;border-radius:8px;border:.5px solid #d0d3d9;color:inherit;text-decoration:none;background:var(--dsw-alias-bg-base)}\r\n.publish-markrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}\r\n.publish-marked-note{color:var(--dsw-alias-label-secondary)}\r\n.publish-rule-note{display:block;margin-top:8px;color:var(--dsw-alias-label-secondary)}\r\n.publish-draft-row{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px;cursor:pointer}\r\n.publish-draft-row.picked{background:#e8efff}\r\n.publish-draft-row small{color:var(--dsw-alias-label-secondary);font-size:11px}\r\n";
 
 // src/client/index.ts
 var panel = "publish-center";

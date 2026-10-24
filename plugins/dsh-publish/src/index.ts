@@ -10,6 +10,7 @@ import { requestSchema } from './contract.ts'
 import { Ledger } from './ledger.ts'
 import { PublishRuntime } from './runtime.ts'
 import { MetricsStore } from './metrics.ts'
+import { AssistantStore } from './assistant.ts'
 import { mountPublishApi } from './api.ts'
 export { Config }
 export const name = 'publish'
@@ -22,11 +23,12 @@ export async function apply(ctx: Context, live: LiveConfig & { ledgerPath?: stri
  await ledger.adoptLegacy(join(homedir(), '.dsh', 'publish', 'ledger.json'))
  await ledger.reconcileOnStart()
  const metrics = new MetricsStore(join(dirname(ledgerPath), 'metrics.json'))
+ const assistant = new AssistantStore(join(dirname(ledgerPath), 'assistant'))
  const runtime = new PublishRuntime(ctx, ledger, resolved, metrics)
   ctx.jobs.attachController('publish-center')
  ctx.effect(() => () => runtime.dispose(), 'publish: execution lifetime')
- // The page channel registers a physical route, so this fiber must also inject webServer.
- ctx.inject(['connection', 'webServer'], web => mountPublishApi(web, runtime, resolved, ledgerPath, metrics))
+ // 页面通道要注册物理路由并调用模型，此 fiber 需同时注入 webServer、llm 与默认模型路由。
+ ctx.inject(['connection', 'webServer', 'llm', 'agentDefaultModel'], web => mountPublishApi(web, runtime, resolved, ledgerPath, metrics, assistant))
   ctx.tools.register(defineTool({
     name: 'publish_accounts',
     description: '列出已配置的发布账号，并可查上游登录态。只读，不会发布。',
