@@ -8,6 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { Calendar, PlatformIcon, RecordRow, SettingsContent, recordDay, statusLabel } from './common.tsx'
 import type { ShellActions } from './common.tsx'
 import { PlatformDetail } from './PlatformDetail.tsx'
+import { Assistant, DraftsList } from './Assistant.tsx'
 import type { PublishController } from './model.ts'
 import type { PageState } from './model.ts'
 import type { TabKey } from './model.ts'
@@ -19,7 +20,7 @@ type Bindings=InjectFace<Face>&PropsLocale<'publish.center'>
 type SettingsState=ReturnType<PublishController['settings']['getSnapshot']>
 /** Existing send glyph; the sidebar owns its accessible label. */
 export function PublishIcon({size}:PropsRuntime<'sidebar.panellist'>){return <IconSendOutlineRegular size={size}/>}
-const TAB_KEYS:{key:TabKey;label:Key}[]=[{key:'overview',label:'overview'},{key:'accounts',label:'accounts'},{key:'settings',label:'settings'}]
+const TAB_KEYS:{key:TabKey;label:Key}[]=[{key:'assist',label:'assistTab'},{key:'drafts',label:'draftsTab'},{key:'overview',label:'overview'},{key:'accounts',label:'accounts'},{key:'settings',label:'settings'}]
 /** The main publishing surface. */
 export function PublishPage(props:PropsRuntime<'main'>&Bindings){
  const {t}=props
@@ -38,11 +39,15 @@ export function PublishPage(props:PropsRuntime<'main'>&Bindings){
    {state.data&&!state.data.publishingEnabled&&<p className="publish-notice">{t('paused')}</p>}
    {inDetail
     ?state.data&&<PlatformDetail state={state} face={props} t={t} month={month} data={state.data}/>
-    :activeTab==='overview'
-     ?state.data&&<Overview state={state} face={props} t={t} month={month} data={state.data}/>
-     :activeTab==='accounts'
-      ?<AccountsSection state={state} settingsState={settingsState} t={t} face={props}/>
-      :<SettingsSection settingsState={settingsState} t={t} face={props} ledgerPath={state.data?.ledgerPath}/>}
+    :activeTab==='assist'
+     ?<Assistant state={state} face={props} t={t}/>
+     :activeTab==='drafts'
+      ?<DraftsList state={state} face={props} t={t}/>
+      :activeTab==='overview'
+       ?state.data&&<Overview state={state} face={props} t={t} month={month} data={state.data}/>
+       :activeTab==='accounts'
+        ?<AccountsSection state={state} settingsState={settingsState} t={t} face={props}/>
+        :<SettingsSection settingsState={settingsState} t={t} face={props} ledgerPath={state.data?.ledgerPath}/>}
   </div>
  </div>
 }

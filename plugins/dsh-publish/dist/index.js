@@ -5,7 +5,7 @@ var __export = (target, all) => {
 };
 
 // src/index.ts
-import { join as join2, dirname as dirname4 } from "node:path";
+import { join as join3, dirname as dirname4 } from "node:path";
 import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -14587,6 +14587,51 @@ var requestSchema = external_exports.object({
 var submitSchema = external_exports.object({ prepareId: external_exports.string(), token: external_exports.string(), confirmed: external_exports.literal(true) });
 var prepareIdSchema = external_exports.object({ prepareId: external_exports.string().min(1) });
 var bindSchema = external_exports.object({ prepareId: external_exports.string().min(1), noteId: external_exports.string().min(1) });
+var materialInputSchema = external_exports.object({
+  kind: external_exports.enum(["paste", "markdown", "srt"]),
+  text: external_exports.string().min(1),
+  origin: external_exports.string().max(200).default("\u7C98\u8D34")
+});
+var draftIdSchema = external_exports.object({ draftId: external_exports.string().min(1) });
+var saveFieldSchema = external_exports.object({
+  draftId: external_exports.string().min(1),
+  platform: external_exports.string().min(1),
+  form: external_exports.string().min(1),
+  field: external_exports.string().min(1),
+  text: external_exports.string(),
+  expectedRevision: external_exports.number().int().min(0)
+});
+var understandSchema = external_exports.object({ draftId: external_exports.string().min(1) });
+var adaptSchema = external_exports.object({
+  draftId: external_exports.string().min(1),
+  platform: external_exports.string().min(1),
+  form: external_exports.string().min(1),
+  /** 定向修改指令（如「只改开头」）；缺省为整版生成。 */
+  instruction: external_exports.string().max(500).optional()
+});
+var markSchema = external_exports.object({
+  draftId: external_exports.string().min(1),
+  platform: external_exports.string().min(1),
+  link: external_exports.string().max(500).optional(),
+  note: external_exports.string().max(500).optional()
+});
+var unmarkSchema = external_exports.object({ draftId: external_exports.string().min(1), platform: external_exports.string().min(1) });
+var understandOutputSchema = external_exports.object({
+  summary: external_exports.string().min(1),
+  audience: external_exports.string(),
+  facts: external_exports.array(external_exports.object({ claim: external_exports.string(), quote: external_exports.string() })).default([]),
+  suggestions: external_exports.array(external_exports.object({
+    platform: external_exports.enum(["xiaohongshu", "gongzhonghao"]),
+    form: external_exports.string(),
+    reason: external_exports.string()
+  })).min(1),
+  question: external_exports.object({ question: external_exports.string(), why: external_exports.string() }).optional()
+});
+var adaptOutputSchema = external_exports.object({
+  fields: external_exports.record(external_exports.string(), external_exports.string()),
+  changes: external_exports.array(external_exports.object({ field: external_exports.string(), what: external_exports.string(), why: external_exports.string() })).default([]),
+  warnings: external_exports.array(external_exports.object({ field: external_exports.string(), issue: external_exports.string(), quote: external_exports.string().optional() })).default([])
+});
 
 // src/ledger.ts
 import { existsSync } from "node:fs";
@@ -14719,14 +14764,14 @@ import { stat } from "node:fs/promises";
 async function hashFile(path) {
   const info = await stat(path);
   if (!info.isFile()) throw new Error(`\u4E0D\u662F\u6587\u4EF6\uFF1A${path}`);
-  const hash2 = createHash("sha256");
+  const hash3 = createHash("sha256");
   await new Promise((resolve2, reject) => {
     const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash2.update(chunk));
+    stream.on("data", (chunk) => hash3.update(chunk));
     stream.on("error", reject);
     stream.on("end", () => resolve2());
   });
-  return { hash: hash2.digest("hex"), size: info.size };
+  return { hash: hash3.digest("hex"), size: info.size };
 }
 function digestRequest(request, mediaHashes) {
   const canonical = JSON.stringify({
@@ -15423,14 +15468,323 @@ async function autoMatch(entry, xhs, metrics) {
   });
 }
 
+// src/assistant.ts
+import { createHash as createHash2 } from "node:crypto";
+import { mkdir as mkdir3, readFile as readFile3, readdir, rm, writeFile as writeFile3 } from "node:fs/promises";
+import { join } from "node:path";
+var hash2 = (text) => createHash2("sha256").update(text).digest("hex").slice(0, 16);
+function parseSrt(raw) {
+  const body = raw.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  return body.split(/\n{2,}/).map((block) => block.split("\n").filter((line) => line.trim() !== "" && !/^\d+$/.test(line.trim()) && !line.includes("-->")).join("")).filter((text) => text.length > 0).join("\n");
+}
+var AssistantStore = class {
+  constructor(root) {
+    this.root = root;
+  }
+  root;
+  draftDir(draftId) {
+    return join(this.root, "drafts", draftId);
+  }
+  async createDraft(input) {
+    const draftId = "d_" + hash2(`${input.origin}:${input.text}:${Date.now()}:${Math.random()}`);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const material = {
+      draftId,
+      kind: input.kind,
+      text: input.text,
+      contentHash: hash2(input.text),
+      origin: input.origin,
+      createdAt: now,
+      updatedAt: now,
+      attachments: input.attachments ?? []
+    };
+    await mkdir3(join(this.draftDir(draftId), "platforms"), { recursive: true });
+    await this.saveMaterial(material);
+    return material;
+  }
+  async saveMaterial(material) {
+    material.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await mkdir3(this.draftDir(material.draftId), { recursive: true });
+    await writeFile3(join(this.draftDir(material.draftId), "material.json"), JSON.stringify(material, null, 2) + "\n", "utf8");
+  }
+  async getMaterial(draftId) {
+    try {
+      return JSON.parse(await readFile3(join(this.draftDir(draftId), "material.json"), "utf8"));
+    } catch {
+      return void 0;
+    }
+  }
+  async listDrafts() {
+    try {
+      const dirs = await readdir(join(this.root, "drafts"));
+      const materials = await Promise.all(dirs.map((dir) => this.getMaterial(dir)));
+      return materials.filter((row) => row !== void 0).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    } catch {
+      return [];
+    }
+  }
+  async deleteDraft(draftId) {
+    await rm(this.draftDir(draftId), { recursive: true, force: true });
+    const records = await this.manualRecords(draftId);
+    if (records.length === 0) {
+    }
+  }
+  async getPlatformDraft(draftId, platform) {
+    try {
+      return JSON.parse(await readFile3(join(this.draftDir(draftId), "platforms", `${platform}.json`), "utf8"));
+    } catch {
+      return void 0;
+    }
+  }
+  /**
+   * 修订号围栏保存：expectedRevision 不匹配时拒绝（陈旧覆盖），返回 false。
+   * 传入 fields 里 edited=true 的字段保持 edited；AI 写入路径走 applyGeneration（只动未 edited 字段）。
+   */
+  async savePlatformDraft(draftId, platform, form, fields, expectedRevision) {
+    const existing = await this.getPlatformDraft(draftId, platform);
+    if (existing && existing.revision !== expectedRevision) return false;
+    const next = {
+      platform,
+      form,
+      revision: (existing?.revision ?? 0) + 1,
+      fields: { ...existing?.fields ?? {}, ...fields },
+      ...existing?.lastGeneration ? { lastGeneration: existing.lastGeneration } : {},
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await mkdir3(join(this.draftDir(draftId), "platforms"), { recursive: true });
+    await writeFile3(join(this.draftDir(draftId), "platforms", `${platform}.json`), JSON.stringify(next, null, 2) + "\n", "utf8");
+    return next;
+  }
+  /** AI 生成结果落草稿：只覆盖未 edited 的字段；edited 字段返回为候选不落盘。 */
+  async applyGeneration(draftId, platform, form, generated, generationId) {
+    const existing = await this.getPlatformDraft(draftId, platform);
+    const protectedFields = [];
+    const fields = { ...existing?.fields ?? {} };
+    for (const [field, text] of Object.entries(generated)) {
+      if (fields[field]?.edited) {
+        protectedFields.push(field);
+        continue;
+      }
+      fields[field] = { text, edited: false };
+    }
+    const next = {
+      platform,
+      form,
+      revision: (existing?.revision ?? 0) + 1,
+      fields,
+      lastGeneration: generationId,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    await mkdir3(join(this.draftDir(draftId), "platforms"), { recursive: true });
+    await writeFile3(join(this.draftDir(draftId), "platforms", `${platform}.json`), JSON.stringify(next, null, 2) + "\n", "utf8");
+    return { draft: next, protectedFields };
+  }
+  async appendGeneration(record2) {
+    const path = join(this.root, "generations.jsonl");
+    await mkdir3(this.root, { recursive: true });
+    const line = JSON.stringify(record2) + "\n";
+    await writeFile3(path, line, { flag: "a" });
+  }
+  async manualRecords(draftId) {
+    try {
+      const all = JSON.parse(await readFile3(join(this.root, "manual-records.json"), "utf8"));
+      return all.filter((row) => row.draftId === draftId);
+    } catch {
+      return [];
+    }
+  }
+  async allManual() {
+    try {
+      return JSON.parse(await readFile3(join(this.root, "manual-records.json"), "utf8"));
+    } catch {
+      return [];
+    }
+  }
+  /** 标记已发：绑定当前字段快照；同平台重复标记按再次标记处理（更新快照与时间）。 */
+  async markPublished(input) {
+    const all = await this.allManual();
+    const record2 = { ...input, markedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const at = all.findIndex((row) => row.draftId === input.draftId && row.platform === input.platform);
+    if (at >= 0) all[at] = record2;
+    else all.push(record2);
+    await mkdir3(this.root, { recursive: true });
+    await writeFile3(join(this.root, "manual-records.json"), JSON.stringify(all, null, 2) + "\n", "utf8");
+    return record2;
+  }
+  /** 撤销标记：只纠正本插件记录，保留撤销时间以便追溯。 */
+  async unmarkPublished(draftId, platform) {
+    const all = await this.allManual();
+    const record2 = all.find((row) => row.draftId === draftId && row.platform === platform && !row.unmarkedAt);
+    if (!record2) return void 0;
+    record2.unmarkedAt = (/* @__PURE__ */ new Date()).toISOString();
+    await mkdir3(this.root, { recursive: true });
+    await writeFile3(join(this.root, "manual-records.json"), JSON.stringify(all, null, 2) + "\n", "utf8");
+    return record2;
+  }
+  async listManual() {
+    return (await this.allManual()).sort((a, b) => b.markedAt.localeCompare(a.markedAt));
+  }
+};
+
 // src/api.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir3, open, rm } from "node:fs/promises";
-import { dirname as dirname3, join, basename } from "node:path";
-function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics) {
+import { mkdir as mkdir4, open, rm as rm2 } from "node:fs/promises";
+import { dirname as dirname3, join as join2, basename } from "node:path";
+
+// src/rules.ts
+function weightedLength(text, urlLength = 23) {
+  const urls = text.match(/https?:\/\/\S+/g) ?? [];
+  let rest = text;
+  for (const url2 of urls) rest = rest.replace(url2, "");
+  let weight = 0;
+  for (const char of rest) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 4352 && (code <= 4447 || code === 9001 || code === 9002 || code >= 11904 && code <= 42191 && code !== 12351 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65072 && code <= 65135 || code >= 65280 && code <= 65376 || code >= 65504 && code <= 65510 || code >= 131072 && code <= 262141)) weight += 2;
+    else if (code !== 8205 && code !== 65039) weight += 1;
+  }
+  return weight + urls.length * urlLength;
+}
+function cjkLength(text) {
+  return [...text].length;
+}
+function countFor(unit, text) {
+  if (unit === "weighted") return weightedLength(text);
+  return cjkLength(text);
+}
+var RULES = [
+  {
+    platform: "xiaohongshu",
+    form: "note",
+    fields: ["title", "body", "tags"],
+    lengths: [
+      { field: "title", max: 20, unit: "cjk", level: "hard", source: "xiaohongshu-mcp README \u8FD0\u8425\u7EA6\u675F\uFF08\u521B\u4F5C\u52A9\u624B\u5E38\u89C1\u53E3\u5F84\uFF09", verifiedAt: "2026-10-24" },
+      { field: "body", max: 1e3, unit: "cjk", level: "advise", source: "\u540C\u4E0A\uFF1B\u666E\u901A\u7B14\u8BB0\u7F16\u8F91\u5668\u5B9E\u6D4B\u53EF\u80FD\u653E\u5BBD", verifiedAt: "2026-10-24" }
+    ],
+    studioUrl: "https://creator.xiaohongshu.com/publish/publish?source=official",
+    notes: "\u8BDD\u9898\u5EFA\u8BAE 3\u20136 \u4E2A\uFF08\u5EFA\u8BAE\uFF0C\u975E\u786C\u9650\uFF09"
+  },
+  {
+    platform: "gongzhonghao",
+    form: "article",
+    fields: ["title", "digest", "body"],
+    lengths: [
+      { field: "title", max: 64, unit: "cjk", level: "hard", source: "\u516C\u4F17\u53F7\u540E\u53F0\u521B\u5EFA\u9875\u6807\u9898\u8BA1\u6570", verifiedAt: "2026-10-24" },
+      { field: "digest", max: 120, unit: "cjk", level: "hard", source: "\u516C\u4F17\u53F7\u540E\u53F0\u6458\u8981\u8BA1\u6570", verifiedAt: "2026-10-24" }
+    ],
+    studioUrl: "https://mp.weixin.qq.com/",
+    notes: "\u56FE\u7247\uFF08\u542B\u5C01\u9762\uFF09\u4ECD\u9700\u5728\u5E73\u53F0\u540E\u53F0\u4E0A\u4F20\uFF1B\u672C\u63D2\u4EF6\u63D0\u4F9B\u6587\u672C\u4E0E\u6392\u7248\u590D\u5236"
+  },
+  {
+    platform: "douyin",
+    form: "video",
+    fields: ["hook", "body", "tags"],
+    lengths: [
+      { field: "body", max: 55, unit: "cjk", level: "advise", source: "\u524D\u53F0\u6298\u53E0\u5C55\u793A\u7ECF\u9A8C\u503C\uFF1B\u7F16\u8F91\u5668\u5B8C\u6574\u4E0A\u9650\u672A\u6838\u5B9E", verifiedAt: "2026-10-24" }
+    ],
+    studioUrl: "https://creator.douyin.com/creator-micro/content/upload",
+    notes: "\u6279\u6B21 2 \u542F\u7528"
+  },
+  {
+    platform: "shipinhao",
+    form: "video",
+    fields: ["hook", "body", "tags"],
+    lengths: [
+      { field: "body", max: 60, unit: "cjk", level: "advise", source: "\u793E\u533A\u7ECF\u9A8C\u503C\uFF1B\u5B98\u65B9\u672A\u516C\u5E03", verifiedAt: "2026-10-24" }
+    ],
+    studioUrl: "https://channels.weixin.qq.com/platform/post/create",
+    notes: "\u6279\u6B21 2 \u542F\u7528"
+  },
+  {
+    platform: "x",
+    form: "shortpost",
+    fields: ["body", "tags"],
+    lengths: [
+      { field: "body", max: 280, unit: "weighted", level: "hard", source: "X \u5B98\u65B9\u5B57\u7B26\u8BA1\u6570\u89C4\u5219\uFF08URL=23\uFF0CCJK=2\uFF09", verifiedAt: "2026-10-24" }
+    ],
+    studioUrl: "https://x.com/compose/post",
+    notes: "\u6279\u6B21 2 \u542F\u7528\uFF1B\u957F\u6587\u80FD\u529B\u4E0D\u627F\u8BFA"
+  }
+];
+function rulesFor(platform, form) {
+  return RULES.find((rule) => rule.platform === platform && rule.form === form);
+}
+function checkDraft(platform, form, fields) {
+  const rule = rulesFor(platform, form);
+  if (!rule) return [];
+  return rule.lengths.map((length) => {
+    const count = countFor(length.unit, fields[length.field] ?? "");
+    return { field: length.field, count, max: length.max, level: length.level, exceeded: count > length.max, unit: length.unit };
+  });
+}
+var STUDIO_WHITELIST = [...new Set(RULES.map((rule) => rule.studioUrl))];
+
+// src/api.ts
+function stripFence(output) {
+  const trimmed = output.trim();
+  const fenced = trimmed.match(/^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/);
+  const body = fenced?.[1] ?? trimmed;
+  return JSON.parse(body);
+}
+function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics, assistant) {
   const tickets = /* @__PURE__ */ new Map();
   const lifetime = new AbortController();
   const uploads = /* @__PURE__ */ new Set();
+  const structuredCall = async (input) => {
+    const defaults = ctx.agentDefaultModel?.currentSelection();
+    if (!defaults?.provider || !defaults.model) throw new Error("\u5C1A\u672A\u914D\u7F6E\u9ED8\u8BA4\u6A21\u578B\uFF1A\u8BF7\u5148\u5728 DSH \u8BBE\u7F6E\u91CC\u9009\u62E9\u6A21\u578B");
+    const id = "g_" + randomUUID2().slice(0, 12);
+    const call = async () => {
+      const stream = ctx.llm.stream({
+        provider: defaults.provider,
+        model: defaults.model,
+        system: input.system,
+        messages: [{ role: "user", content: [{ type: "text", text: input.user }] }]
+      });
+      let text = "";
+      for await (const chunk of stream) {
+        if (chunk.type === "text-delta") text += chunk.text;
+        if (chunk.type === "finish") {
+          const reason = chunk.reason;
+          if (reason.kind === "error" || reason.kind === "aborted") throw new Error(reason.failure?.message ?? `\u6A21\u578B\u8C03\u7528\u5931\u8D25\uFF08${reason.kind}\uFF09`);
+        }
+      }
+      return text;
+    };
+    let output = "";
+    let parsed;
+    let failure;
+    try {
+      output = await call();
+      parsed = input.schema.parse(stripFence(output));
+    } catch (error51) {
+      failure = error51 instanceof Error ? error51.message : String(error51);
+      try {
+        output = await call();
+        parsed = input.schema.parse(stripFence(output));
+        failure = void 0;
+      } catch (retryError) {
+        failure = retryError instanceof Error ? retryError.message : String(retryError);
+      }
+    }
+    await assistant?.appendGeneration({
+      id,
+      draftId: input.draftId,
+      task: input.task,
+      platform: input.platform,
+      materialHash: input.materialHash,
+      prompt: `system: ${input.system}
+user: ${input.user}`.slice(0, 8e3),
+      provider: defaults.provider,
+      model: defaults.model,
+      request: { task: input.task, platform: input.platform },
+      output: output.slice(0, 2e4),
+      ok: parsed !== void 0,
+      ...failure ? { error: failure } : {},
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    if (parsed === void 0) throw new Error(`\u6A21\u578B\u8F93\u51FA\u4E0D\u7B26\u5408\u9884\u671F\u7ED3\u6784\uFF1A${failure ?? "\u7A7A\u8F93\u51FA"}`);
+    return parsed;
+  };
   ctx.effect(() => () => {
     lifetime.abort();
     tickets.clear();
@@ -15439,6 +15793,44 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics) {
   }, "publish: upload lifetime");
   const endpoints = {
     state: async () => ({ ...await runtime.status(), platforms: PLATFORMS, configuredAccounts: config2().accounts, publishingEnabled: config2().publishingEnabled, homeCards: config2().homeCards, ledgerPath }),
+    "ai.status": async (_payload, signal) => {
+      signal.throwIfAborted();
+      const defaults = ctx.agentDefaultModel?.currentSelection();
+      if (!defaults || !defaults.provider || !defaults.model) {
+        return { ok: false, reason: "no-model", hint: "DSH \u8BBE\u7F6E\u91CC\u8FD8\u6CA1\u6709\u914D\u7F6E\u9ED8\u8BA4\u6A21\u578B\uFF1B\u914D\u7F6E\u540E\u751F\u6210\u80FD\u529B\u53EF\u7528" };
+      }
+      let reachable = false;
+      let sample = "";
+      let error51;
+      let hint;
+      const seen = {};
+      let finish;
+      try {
+        const stream = ctx.llm.stream({
+          provider: defaults.provider,
+          model: defaults.model,
+          system: "\u4F60\u662F\u8FDE\u901A\u6027\u63A2\u6D4B\u3002\u53EA\u56DE\u590D\u4E24\u4E2A\u5B57\u6BCD\uFF1Aok",
+          messages: [{ role: "user", content: [{ type: "text", text: "ping" }] }],
+          signal
+        });
+        for await (const chunk of stream) {
+          seen[chunk.type] = (seen[chunk.type] ?? 0) + 1;
+          if (chunk.type === "text-delta") sample += chunk.text;
+          if (chunk.type === "finish") {
+            const reason = chunk.reason;
+            finish = reason.kind;
+            if (reason.kind === "error" || reason.kind === "aborted") {
+              error51 = reason.failure?.message ?? reason.kind;
+              if (reason.failure?.code === "ACCOUNT_SIGN_IN_REQUIRED") hint = "\u751F\u6210\u7528\u7684\u6A21\u578B\u8D70 DeepSeek \u8D26\u53F7\u767B\u5F55\uFF1B\u8BF7\u5148\u5728 DSH \u4E2D\u767B\u5F55\u8BE5\u8D26\u53F7";
+            }
+          }
+        }
+        reachable = sample.trim().length > 0;
+      } catch (cause) {
+        error51 = cause instanceof Error ? cause.message : String(cause);
+      }
+      return { ok: reachable, provider: defaults.provider, model: defaults.model, sample, ...finish ? { finish } : {}, ...error51 ? { error: error51 } : {}, ...hint ? { hint } : {} };
+    },
     accounts: async () => runtime.accounts(),
     prepare: async (payload, signal) => {
       signal.throwIfAborted();
@@ -15510,6 +15902,107 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics) {
       if (!entry) throw new Error("\u6CA1\u6709\u8FD9\u6761\u53D1\u5E03\u8BB0\u5F55");
       await metrics.unbind(entry.key);
       return { key: entry.key };
+    },
+    /** ===== 智能发布助手（v0.4 批次 1） ===== */
+    "assistant.material": async (payload, signal) => {
+      signal.throwIfAborted();
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const input = materialInputSchema.parse(payload);
+      const text = input.kind === "srt" ? parseSrt(input.text) : input.text;
+      if (text.trim().length === 0) throw new Error(input.kind === "srt" ? "\u5B57\u5E55\u91CC\u6CA1\u6709\u53EF\u8BFB\u6587\u672C" : "\u5185\u5BB9\u4E3A\u7A7A");
+      return { material: await assistant.createDraft({ kind: input.kind, text, origin: input.origin }) };
+    },
+    "assistant.drafts": async () => {
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      return { drafts: await assistant.listDrafts() };
+    },
+    "assistant.draft": async (payload) => {
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const { draftId } = draftIdSchema.parse(payload);
+      const material = await assistant.getMaterial(draftId);
+      if (!material) throw new Error("\u8349\u7A3F\u4E0D\u5B58\u5728");
+      const platforms = RULES.map((rule) => rule.platform).filter((value, index, array2) => array2.indexOf(value) === index);
+      const drafts = await Promise.all(platforms.map(async (platform) => ({ platform, draft: await assistant.getPlatformDraft(draftId, platform) })));
+      return { material, platformDrafts: drafts.filter((row) => row.draft !== void 0), manualRecords: await assistant.manualRecords(draftId), rules: RULES };
+    },
+    "assistant.saveField": async (payload) => {
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const input = saveFieldSchema.parse(payload);
+      const fields = { [input.field]: { text: input.text, edited: true } };
+      const saved = await assistant.savePlatformDraft(input.draftId, input.platform, input.form, fields, input.expectedRevision);
+      if (saved === false) throw new Error("\u5185\u5BB9\u5DF2\u5728\u522B\u5904\u88AB\u4FEE\u6539\uFF08\u7248\u672C\u4E0D\u4E00\u81F4\uFF09\uFF1B\u8BF7\u5237\u65B0\u540E\u518D\u6539");
+      return { draft: saved, checks: checkDraft(input.platform, input.form, Object.fromEntries(Object.entries(saved.fields).map(([key, value]) => [key, value.text]))) };
+    },
+    "ai.understand": async (payload, signal) => {
+      signal.throwIfAborted();
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const { draftId } = understandSchema.parse(payload);
+      const material = await assistant.getMaterial(draftId);
+      if (!material) throw new Error("\u8349\u7A3F\u4E0D\u5B58\u5728");
+      const system = [
+        "\u4F60\u662F\u53D1\u5E03\u52A9\u624B\u7684\u5185\u5BB9\u7406\u89E3\u5668\u3002\u8BFB\u53D6\u7D20\u6750\uFF0C\u8F93\u51FA\u4E25\u683C\u7684 JSON\uFF08\u4E0D\u8981\u56F4\u680F\u3001\u4E0D\u8981\u591A\u4F59\u6587\u5B57\uFF09\u3002",
+        "\u8981\u6C42\uFF1Asummary \u4E00\u53E5\u8BDD\u8BB2\u8FD9\u7BC7\u8BB2\u4EC0\u4E48\uFF1Baudience \u9762\u5411\u8C01\uFF1Bfacts \u5217\u51FA\u7D20\u6750\u4E2D\u5DF2\u6709\u4F9D\u636E\u7684\u4E8B\u5B9E\uFF08claim + \u539F\u53E5 quote\uFF0Cquote \u5FC5\u987B\u662F\u7D20\u6750\u539F\u6587\uFF09\uFF1B",
+        "suggestions \u4ECE xiaohongshu\uFF08\u56FE\u6587\uFF0C\u5B57\u6BB5 title/body/tags\uFF09\u4E0E gongzhonghao\uFF08\u6587\u7AE0\uFF0C\u5B57\u6BB5 title/digest/body\uFF09\u91CC\u63A8\u8350\u9002\u5408\u7684\u5E73\u53F0\u4E0E\u5F62\u5F0F\u5E76\u7ED9\u7406\u7531\uFF0C\u81F3\u5C11\u4E00\u6761\uFF1B",
+        "\u5982\u679C\u7D20\u6750\u7F3A\u4E00\u4E2A\u5F71\u54CD\u751F\u6210\u8D28\u91CF\u7684\u5173\u952E\u4E8B\u5B9E\uFF0Cquestion \u91CC\u53EA\u95EE\u8FD9\u4E00\u4EF6\u4E8B\uFF08question + why\uFF09\uFF1B\u6CA1\u6709\u5C31\u7701\u7565\u3002",
+        "\u7981\u6B62\u7F16\u9020\u7D20\u6750\u91CC\u4E0D\u5B58\u5728\u7684\u6570\u636E\u3001\u7ECF\u5386\u6216\u5F15\u7528\u3002",
+        'JSON \u7ED3\u6784\uFF1A{"summary":string,"audience":string,"facts":[{"claim":string,"quote":string}],"suggestions":[{"platform":"xiaohongshu"|"gongzhonghao","form":string,"reason":string}],"question":{"question":string,"why":string}}'
+      ].join("\n");
+      const user = `\u7D20\u6750\uFF08${material.origin}\uFF09\uFF1A
+${material.text.slice(0, 12e3)}`;
+      const result = await structuredCall({ task: "understand", system, user, schema: understandOutputSchema, draftId, materialHash: material.contentHash });
+      return { understanding: result };
+    },
+    "ai.adapt": async (payload, signal) => {
+      signal.throwIfAborted();
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const input = adaptSchema.parse(payload);
+      const material = await assistant.getMaterial(input.draftId);
+      if (!material) throw new Error("\u8349\u7A3F\u4E0D\u5B58\u5728");
+      const rule = rulesFor(input.platform, input.form);
+      if (!rule) throw new Error(`\u6CA1\u6709 ${input.platform}/${input.form} \u7684\u89C4\u5219\u8868`);
+      const existing = await assistant.getPlatformDraft(input.draftId, input.platform);
+      const limits = rule.lengths.map((length) => `${length.field} \u2264 ${length.max}${length.unit === "weighted" ? "\u52A0\u6743\u5B57\u7B26(URL=23,\u4E2D\u6587=2)" : "\u5B57"}\uFF08${length.level === "hard" ? "\u786C\u9650" : "\u5EFA\u8BAE"}\uFF09`).join("\uFF1B");
+      const system = [
+        `\u4F60\u662F\u53D1\u5E03\u52A9\u624B\u7684\u5E73\u53F0\u9002\u914D\u5668\u3002\u4E3A\u300C${input.platform}\u300D\u7684\u300C${input.form}\u300D\u751F\u6210\u4E00\u4EFD\u53EF\u76F4\u63A5\u53D1\u5E03\u7684\u7248\u672C\u3002\u8F93\u51FA\u4E25\u683C JSON\uFF0C\u4E0D\u8981\u56F4\u680F\u3002`,
+        `\u5B57\u6BB5\uFF1A${rule.fields.join("/")}\u3002\u9650\u5236\uFF1A${limits || "\u65E0\u58F0\u660E\u9650\u5236"}\u3002`,
+        "\u8981\u6C42\uFF1A\u5185\u5BB9\u53EA\u6765\u81EA\u7D20\u6750\u4E0E\u7528\u6237\u6307\u793A\uFF0C\u7981\u6B62\u7F16\u9020\u6570\u636E\u3001\u7ECF\u5386\u3001\u5F15\u7528\uFF1B\u6807\u9898\u4E0D\u5F97\u5938\u5927\uFF1B",
+        "changes \u9010\u5B57\u6BB5\u8BF4\u660E\u6539\u4E86\u4EC0\u4E48\u3001\u4E3A\u4EC0\u4E48\uFF08\u4F9D\u636E\u7D20\u6750\u7684\u54EA\u4E9B\u5185\u5BB9\uFF09\uFF1B",
+        "warnings \u662F\u81EA\u67E5\uFF1A\u6807\u9898\u5938\u5927 / \u6B63\u6587\u51FA\u73B0\u7D20\u6750\u91CC\u6CA1\u6709\u7684\u6570\u5B57 / \u4E0E\u7D20\u6750\u4E0D\u4E00\u81F4\uFF0C\u80FD\u5F15\u539F\u53E5\u5C31\u5E26 quote\uFF1B\u6CA1\u6709\u5C31\u7A7A\u6570\u7EC4\u3002",
+        input.instruction ? `\u7528\u6237\u5B9A\u5411\u4FEE\u6539\u6307\u4EE4\uFF08\u53EA\u505A\u8FD9\u4EF6\u4E8B\uFF0C\u5176\u4F59\u5B57\u6BB5\u539F\u6837\u8FD4\u56DE\uFF09\uFF1A${input.instruction}` : "",
+        'JSON \u7ED3\u6784\uFF1A{"fields":{\u5B57\u6BB5\u540D:\u5185\u5BB9},"changes":[{"field":string,"what":string,"why":string}],"warnings":[{"field":string,"issue":string,"quote":string}]}'
+      ].filter(Boolean).join("\n");
+      const currentFields = existing ? JSON.stringify(Object.fromEntries(Object.entries(existing.fields).map(([key, value]) => [key, value.text]))) : "\uFF08\u9996\u6B21\u751F\u6210\uFF09";
+      const user = `\u7D20\u6750\uFF08${material.origin}\uFF09\uFF1A
+${material.text.slice(0, 12e3)}
+
+\u8BE5\u5E73\u53F0\u5F53\u524D\u5B57\u6BB5\u503C\uFF1A${currentFields}`;
+      const result = await structuredCall({ task: "adapt", system, user, schema: adaptOutputSchema, draftId: input.draftId, materialHash: material.contentHash, platform: input.platform });
+      const { draft, protectedFields } = await assistant.applyGeneration(input.draftId, input.platform, input.form, result.fields, "");
+      const fieldTexts = Object.fromEntries(Object.entries(draft.fields).map(([key, value]) => [key, value.text]));
+      return { draft, changes: result.changes, warnings: result.warnings, protectedFields, checks: checkDraft(input.platform, input.form, fieldTexts) };
+    },
+    "assistant.mark": async (payload) => {
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const input = markSchema.parse(payload);
+      const draft = await assistant.getPlatformDraft(input.draftId, input.platform);
+      if (!draft) throw new Error("\u8BE5\u5E73\u53F0\u8FD8\u6CA1\u6709\u8349\u7A3F");
+      const material = await assistant.getMaterial(input.draftId);
+      if (!material) throw new Error("\u8349\u7A3F\u4E0D\u5B58\u5728");
+      const snapshot = Object.fromEntries(Object.entries(draft.fields).map(([key, value]) => [key, value.text]));
+      const record2 = await assistant.markPublished({ draftId: input.draftId, platform: input.platform, snapshot, materialHash: material.contentHash, ...input.link ? { link: input.link } : {}, ...input.note ? { note: input.note } : {} });
+      return { record: record2 };
+    },
+    "assistant.unmark": async (payload) => {
+      if (!assistant) throw new Error("\u667A\u80FD\u52A9\u624B\u672A\u542F\u7528");
+      const input = unmarkSchema.parse(payload);
+      const record2 = await assistant.unmarkPublished(input.draftId, input.platform);
+      if (!record2) throw new Error("\u6CA1\u6709\u53EF\u64A4\u9500\u7684\u6807\u8BB0");
+      return { record: record2 };
+    },
+    "assistant.studio": async (payload) => {
+      const { draftId } = draftIdSchema.parse(payload);
+      void draftId;
+      return { urls: STUDIO_WHITELIST };
     }
   };
   for (const [endpoint, handle] of Object.entries(endpoints)) {
@@ -15532,7 +16025,7 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics) {
     methods: ["POST"],
     requestBody: "streaming",
     fetch: (request) => {
-      const task = upload(request, config2().maxMediaBytes, join(dirname3(ledgerPath), "media"), AbortSignal.any([request.signal, lifetime.signal]));
+      const task = upload(request, config2().maxMediaBytes, join2(dirname3(ledgerPath), "media"), AbortSignal.any([request.signal, lifetime.signal]));
       uploads.add(task);
       void task.then(() => uploads.delete(task), () => uploads.delete(task));
       return task;
@@ -15545,8 +16038,8 @@ async function upload(request, limit, directory, signal) {
   try {
     if (!request.body) throw new Error("\u6CA1\u6709\u6536\u5230\u5A92\u4F53\u6587\u4EF6");
     const name2 = basename(decodeURIComponent(request.headers.get("x-publish-name") ?? "media")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
-    await mkdir3(directory, { recursive: true });
-    path = join(directory, randomUUID2() + "-" + name2);
+    await mkdir4(directory, { recursive: true });
+    path = join2(directory, randomUUID2() + "-" + name2);
     const file2 = await open(path, "wx");
     let size = 0;
     try {
@@ -15573,7 +16066,7 @@ async function upload(request, limit, directory, signal) {
   } catch (error51) {
     return Response.json({ error: error51 instanceof Error ? error51.message : "\u5A92\u4F53\u4E0A\u4F20\u5931\u8D25" }, { status: 400 });
   } finally {
-    if (path && !committed) await rm(path, { force: true });
+    if (path && !committed) await rm2(path, { force: true });
   }
 }
 
@@ -15582,15 +16075,16 @@ var name = "publish";
 var inject = ["tools", "jobs", "approval"];
 async function apply(ctx, live) {
   const resolved = () => resolveConfig(live);
-  const ledgerPath = resolved().ledgerPath ?? join2(resolveDshHome(), "publish", "ledger.json");
+  const ledgerPath = resolved().ledgerPath ?? join3(resolveDshHome(), "publish", "ledger.json");
   const ledger = new Ledger(ledgerPath);
-  await ledger.adoptLegacy(join2(homedir(), ".dsh", "publish", "ledger.json"));
+  await ledger.adoptLegacy(join3(homedir(), ".dsh", "publish", "ledger.json"));
   await ledger.reconcileOnStart();
-  const metrics = new MetricsStore(join2(dirname4(ledgerPath), "metrics.json"));
+  const metrics = new MetricsStore(join3(dirname4(ledgerPath), "metrics.json"));
+  const assistant = new AssistantStore(join3(dirname4(ledgerPath), "assistant"));
   const runtime = new PublishRuntime(ctx, ledger, resolved, metrics);
   ctx.jobs.attachController("publish-center");
   ctx.effect(() => () => runtime.dispose(), "publish: execution lifetime");
-  ctx.inject(["connection", "webServer"], (web) => mountPublishApi(web, runtime, resolved, ledgerPath, metrics));
+  ctx.inject(["connection", "webServer", "llm", "agentDefaultModel"], (web) => mountPublishApi(web, runtime, resolved, ledgerPath, metrics, assistant));
   ctx.tools.register(defineTool({
     name: "publish_accounts",
     description: "\u5217\u51FA\u5DF2\u914D\u7F6E\u7684\u53D1\u5E03\u8D26\u53F7\uFF0C\u5E76\u53EF\u67E5\u4E0A\u6E38\u767B\u5F55\u6001\u3002\u53EA\u8BFB\uFF0C\u4E0D\u4F1A\u53D1\u5E03\u3002",

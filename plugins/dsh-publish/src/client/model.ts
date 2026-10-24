@@ -5,7 +5,24 @@ import type { Config } from '../config.ts'
 import type { PublishRequest, LedgerEntry, PrepareResult } from '../types.ts'
 import type { PlatformSpec } from '../platforms.ts'
 import type { NoteMetrics } from '../metrics-types.ts'
+import type { Material, PlatformDraft, ManualRecord } from '../assistant-types.ts'
+import type { PlatformFormRule, CheckResult } from '../rules.ts'
 import { moveCard } from './order.ts'
+
+export interface Understanding {
+  summary: string
+  audience: string
+  facts: { claim: string; quote: string }[]
+  suggestions: { platform: 'xiaohongshu' | 'gongzhonghao'; form: string; reason: string }[]
+  question?: { question: string; why: string }
+}
+export interface AdaptResult {
+  draft: PlatformDraft
+  changes: { field: string; what: string; why: string }[]
+  warnings: { field: string; issue: string; quote?: string }[]
+  protectedFields: string[]
+  checks: CheckResult[]
+}
 export const textFields = ['xhsBaseUrl','xhsToken','sauBin','sauCwd','dailyTimeZone'] as const
 export const numberFields = ['approvalTimeoutSec','dailyLimit','httpTimeoutMs','publishTimeoutMs','maxMediaBytes'] as const
 export const boolFields = ['showSidebar','publishingEnabled','requireApproval','headed'] as const
@@ -19,7 +36,7 @@ export interface PageData { entries:LedgerEntry[]; platforms:PlatformSpec[]; con
 export interface Review { plan:PrepareResult;request:PublishRequest;token:string;expiresAt:number }
 export interface AccountState {platform:string;account:string;status:string;detail?:string}
 export type PlatformView = { view:'home' } | { view:'platform'; platform:string }
-export type TabKey = 'overview' | 'accounts' | 'settings'
+export type TabKey = 'assist' | 'drafts' | 'overview' | 'accounts' | 'settings'
 export interface PageState {
  data?:PageData; loading:boolean; busy:boolean; error?:string; draft:PublishRequest; review?:Review
  attachments:{path:string;name:string;url?:string;type:string}[]; accounts?:AccountState[]
@@ -32,12 +49,27 @@ export interface PageState {
  notes?:{noteId:string;title:string;type:string}[]
  /** 正在为哪条记录（prepareId）挑选笔记。 */
  bindTarget?:string
+ /** 智能发布助手（v0.4 批次 1）。 */
+ assist?: {
+  drafts: Material[]
+  material?: Material
+  understanding?: Understanding
+  platformDrafts: Record<string, PlatformDraft>
+  manualRecords: ManualRecord[]
+  rules: PlatformFormRule[]
+  /** 最近一次适配的附加结果（changes/warnings/protectedFields/checks），按平台存。 */
+  adaptResults: Record<string, AdaptResult>
+  /** 定向修改指令草稿。 */
+  instruction: string
+ }
+ /** 草稿标签当前选中加载的 draftId。 */
+ activeDraftId?: string
 }
  /** One instance feeds the main panel and the plugin settings page. */
 export class PublishController {
  readonly form:SettingsFormModel<Config>
  readonly settings
- readonly state=createSnapshotStore<PageState>({loading:true,busy:false,draft:{platform:'douyin',account:'',kind:'note',title:'',body:'',media:[]},attachments:[],view:{view:'home'},tab:'overview',moreOpen:false})
+ readonly state=createSnapshotStore<PageState>({loading:true,busy:false,draft:{platform:'douyin',account:'',kind:'note',title:'',body:'',media:[]},attachments:[],view:{view:'home'},tab:'assist',moreOpen:false})
  private readonly abort=new AbortController()
  private timer:ReturnType<typeof setTimeout>|undefined
  private generation=0
@@ -122,10 +154,11 @@ export class PublishController {
   const accepted=await this.writeHomeCards(snapshot.data.homeCards.filter(card=>card!==id))
   if(!accepted&&!this.abort.signal.aborted)this.state.update(s=>{s.error='卡片顺序保存未成功，请重试'})
  }
- async loadMetrics():Promise<void>{await this.action(async()=>{
+ async loadMetrics():Promise<void>{await this.action(()=>this.runLoadMetrics())}
+ private async runLoadMetrics():Promise<void>{
   const result=await this.call<{metrics:Record<string,NoteMetrics>}>('metrics.list')
   this.state.update(s=>{s.metrics=result.metrics})
- })}
+ }
  async refreshMetrics():Promise<void>{await this.action(async()=>{
   const result=await this.call<{metrics:Record<string,NoteMetrics>;failures:string[]}>('metrics.refresh',{})
   this.state.update(s=>{s.metrics=result.metrics;s.error=result.failures.length?result.failures.join('；'):undefined})
@@ -139,12 +172,75 @@ export class PublishController {
   if(!target)throw new Error('没有待关联的记录')
   await this.call('metrics.bind',{prepareId:target,noteId})
   this.state.update(s=>{s.bindTarget=undefined;s.notes=undefined})
-  await this.loadMetrics()
+  await this.runLoadMetrics()
  })}
  cancelBind():void{this.state.update(s=>{s.bindTarget=undefined;s.notes=undefined})}
  async unbindNote(prepareId:string):Promise<void>{await this.action(async()=>{
   await this.call('metrics.unbind',{prepareId})
-  await this.loadMetrics()
+  await this.runLoadMetrics()
+ })}
+ /** ===== 智能发布助手 ===== */
+ async loadDrafts():Promise<void>{await this.action(async()=>{
+  const result=await this.call<{drafts:Material[]}>('assistant.drafts')
+  this.state.update(s=>{s.assist={drafts:result.drafts,platformDrafts:{},manualRecords:[],rules:s.assist?.rules??[],adaptResults:s.assist?.adaptResults??{},instruction:s.assist?.instruction??''}})
+ })}
+ async createMaterial(kind:'paste'|'markdown'|'srt',text:string,origin:string):Promise<void>{await this.action(async()=>{
+  const result=await this.call<{material:Material}>('assistant.material',{kind,text,origin})
+  // action 有 busy 防重入，内部续跑必须用无守卫的实现。
+  await this.runLoadDraft(result.material.draftId)
+ })}
+ private async runLoadDraft(draftId:string):Promise<void>{
+  const result=await this.call<{material:Material;platformDrafts:{platform:string;draft:PlatformDraft}[];manualRecords:ManualRecord[];rules:PlatformFormRule[]}>('assistant.draft',{draftId})
+  this.state.update(s=>{
+   s.activeDraftId=draftId
+   s.tab='assist'
+   s.view={view:'home'}
+   s.assist={
+    drafts:s.assist?.drafts??[],
+    material:result.material,
+    platformDrafts:Object.fromEntries(result.platformDrafts.map(row=>[row.platform,row.draft])),
+    manualRecords:result.manualRecords,
+    rules:result.rules,
+    adaptResults:s.assist?.adaptResults??{},
+    instruction:s.assist?.instruction??'',
+   }
+  })
+ }
+ async loadDraft(draftId:string):Promise<void>{await this.action(()=>this.runLoadDraft(draftId))}
+ setInstruction(text:string):void{this.state.update(s=>{if(s.assist)s.assist.instruction=text})}
+ async understand():Promise<void>{await this.action(async()=>{
+  const material=this.state.getSnapshot().assist?.material
+  if(!material)throw new Error('先输入素材')
+  const result=await this.call<{understanding:Understanding}>('ai.understand',{draftId:material.draftId})
+  this.state.update(s=>{if(s.assist)s.assist.understanding=result.understanding})
+ })}
+ async adapt(platform:string,form:string):Promise<void>{await this.action(async()=>{
+  const snapshot=this.state.getSnapshot()
+  const material=snapshot.assist?.material
+  if(!material)throw new Error('先输入素材')
+  const instruction=snapshot.assist?.instruction.trim()||undefined
+  const result=await this.call<AdaptResult>('ai.adapt',{draftId:material.draftId,platform,form,...(instruction?{instruction}:{})})
+  this.state.update(s=>{if(s.assist){s.assist.platformDrafts={...s.assist.platformDrafts,[platform]:result.draft};s.assist.adaptResults={...s.assist.adaptResults,[platform]:result};s.assist.instruction=''}})
+ })}
+ async saveField(platform:string,form:string,field:string,text:string):Promise<void>{await this.action(async()=>{
+  const snapshot=this.state.getSnapshot()
+  const draft=snapshot.assist?.platformDrafts[platform]
+  if(!draft)throw new Error('该平台还没有草稿')
+  const result=await this.call<{draft:PlatformDraft;checks:CheckResult[]}>('assistant.saveField',{draftId:snapshot.assist!.material!.draftId,platform,form,field,text,expectedRevision:draft.revision})
+  this.state.update(s=>{if(s.assist){s.assist.platformDrafts={...s.assist.platformDrafts,[platform]:result.draft};const prior=s.assist.adaptResults[platform];if(prior)s.assist.adaptResults={...s.assist.adaptResults,[platform]:{...prior,checks:result.checks}}}})
+ })}
+ async markPublished(platform:string,link?:string):Promise<void>{await this.action(async()=>{
+  const snapshot=this.state.getSnapshot()
+  const material=snapshot.assist?.material
+  if(!material)throw new Error('先输入素材')
+  const result=await this.call<{record:ManualRecord}>('assistant.mark',{draftId:material.draftId,platform,...(link?{link}:{})})
+  this.state.update(s=>{if(s.assist)s.assist.manualRecords=[...s.assist.manualRecords.filter(row=>!(row.platform===platform&&row.draftId===material.draftId)),result.record]})
+ })}
+ async unmarkPublished(platform:string):Promise<void>{await this.action(async()=>{
+  const material=this.state.getSnapshot().assist?.material
+  if(!material)throw new Error('先输入素材')
+  await this.call('assistant.unmark',{draftId:material.draftId,platform})
+  await this.runLoadDraft(material.draftId)
  })}
  async action(work:()=>Promise<void>):Promise<void>{
   if(this.state.getSnapshot().busy)return
@@ -171,7 +267,7 @@ export class PublishController {
   }
  })}
  remove(path:string):void{const item=this.state.getSnapshot().attachments.find(x=>x.path===path);if(item?.url)URL.revokeObjectURL(item.url);this.state.update(s=>{s.attachments=s.attachments.filter(x=>x.path!==path);s.draft.media=s.draft.media.filter(x=>x!==path);s.review=undefined})}
- face(){const {edit:editSettings,...actions}=this.form.actions();return {hooks:{publishState:this.state,publishSettings:this.settings},edit:(patch:Partial<PublishRequest>)=>this.edit(patch),openPlatform:(platform:string)=>this.openPlatform(platform),backHome:()=>this.backHome(),setTab:(tab:TabKey)=>this.setTab(tab),setDetailAccount:(account:string)=>this.setDetailAccount(account),toggleMore:()=>this.toggleMore(),selectDate:(key:string)=>this.selectDate(key),reorder:(dragId:string,targetId:string)=>this.reorder(dragId,targetId),commitOrder:()=>{void this.commitOrder()},cancelDrag:()=>this.cancelDrag(),addMore:(id:string)=>{void this.addMore(id)},removeMore:(id:string)=>{void this.removeMore(id)},loadMetrics:()=>{void this.loadMetrics()},refreshMetrics:()=>{void this.refreshMetrics()},startBind:(prepareId:string)=>{void this.startBind(prepareId)},bindNote:(noteId:string)=>{void this.bindNote(noteId)},cancelBind:()=>this.cancelBind(),unbindNote:(prepareId:string)=>{void this.unbindNote(prepareId)},refresh:()=>{void this.refresh()},check:()=>{void this.check()},prepare:()=>{void this.prepare()},submit:()=>{void this.submit()},upload:(files:FileList|null)=>{void this.upload(files)},remove:(path:string)=>this.remove(path),...actions,editSettings}}
+ face(){const {edit:editSettings,...actions}=this.form.actions();return {hooks:{publishState:this.state,publishSettings:this.settings},edit:(patch:Partial<PublishRequest>)=>this.edit(patch),openPlatform:(platform:string)=>this.openPlatform(platform),backHome:()=>this.backHome(),setTab:(tab:TabKey)=>this.setTab(tab),setDetailAccount:(account:string)=>this.setDetailAccount(account),toggleMore:()=>this.toggleMore(),selectDate:(key:string)=>this.selectDate(key),reorder:(dragId:string,targetId:string)=>this.reorder(dragId,targetId),commitOrder:()=>{void this.commitOrder()},cancelDrag:()=>this.cancelDrag(),addMore:(id:string)=>{void this.addMore(id)},removeMore:(id:string)=>{void this.removeMore(id)},loadMetrics:()=>{void this.loadMetrics()},refreshMetrics:()=>{void this.refreshMetrics()},startBind:(prepareId:string)=>{void this.startBind(prepareId)},bindNote:(noteId:string)=>{void this.bindNote(noteId)},cancelBind:()=>this.cancelBind(),unbindNote:(prepareId:string)=>{void this.unbindNote(prepareId)},loadDrafts:()=>{void this.loadDrafts()},createMaterial:(kind:'paste'|'markdown'|'srt',text:string,origin:string)=>{void this.createMaterial(kind,text,origin)},loadDraft:(draftId:string)=>{void this.loadDraft(draftId)},setInstruction:(text:string)=>this.setInstruction(text),understand:()=>{void this.understand()},adapt:(platform:string,form:string)=>{void this.adapt(platform,form)},saveField:(platform:string,form:string,field:string,text:string)=>{void this.saveField(platform,form,field,text)},markPublished:(platform:string,link?:string)=>{void this.markPublished(platform,link)},unmarkPublished:(platform:string)=>{void this.unmarkPublished(platform)},refresh:()=>{void this.refresh()},check:()=>{void this.check()},prepare:()=>{void this.prepare()},submit:()=>{void this.submit()},upload:(files:FileList|null)=>{void this.upload(files)},remove:(path:string)=>this.remove(path),...actions,editSettings}}
  dispose():void{this.abort.abort();if(this.timer)clearTimeout(this.timer);this.form.dispose();for(const item of this.state.getSnapshot().attachments)if(item.url)URL.revokeObjectURL(item.url)}
 }
 function message(error:unknown):string{return error instanceof Error?error.message:String(error)}
