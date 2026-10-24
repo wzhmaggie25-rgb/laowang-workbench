@@ -18,15 +18,20 @@ export interface PlatformSpec {
   /** 上游文档明确写出的限制；没写就不填。 */
   titleMaxChars?: number
   titleMinChars?: number
-  /** 非空表示 v0.1 不让它进发布队列，理由照实写。 */
+  /** 非空表示不让它进发布队列，理由照实写。 */
   blocked?: string
+  /**
+   * 受控验收状态：能力登记自上游文档、但本插件尚未真实发布验收过的平台标记
+   * `'pending'`，界面如实展示「待受控验收」；验收通过后删除该字段。
+   */
+  acceptance?: 'pending'
 }
 
 export const PLATFORMS: readonly PlatformSpec[] = [
-  { id: 'xiaohongshu', adapter: 'xhs', kinds: ['video', 'note'], scheduling: 'xhs', titleMaxChars: 20 },
+  { id: 'xiaohongshu', adapter: 'xhs', kinds: ['note', 'video'], scheduling: 'xhs', titleMaxChars: 20 },
   { id: 'douyin', adapter: 'sau', sauName: 'douyin', kinds: ['video', 'note'], scheduling: 'sau' },
   { id: 'kuaishou', adapter: 'sau', sauName: 'kuaishou', kinds: ['video', 'note'], scheduling: 'sau' },
-  { id: 'tencent', adapter: 'sau', sauName: 'tencent', kinds: ['video'], scheduling: 'sau' },
+  { id: 'tencent', adapter: 'sau', sauName: 'tencent', kinds: ['video'], scheduling: 'sau', acceptance: 'pending' },
   { id: 'dayu', adapter: 'sau', sauName: 'dayu', kinds: ['video', 'article'], scheduling: 'sau' },
   { id: 'baijiahao', adapter: 'sau', sauName: 'baijiahao', kinds: ['video'], scheduling: 'none' },
   { id: 'alipay', adapter: 'sau', sauName: 'alipay', kinds: ['video'], scheduling: 'none' },

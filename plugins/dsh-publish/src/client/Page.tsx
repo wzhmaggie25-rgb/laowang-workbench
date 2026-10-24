@@ -1,11 +1,17 @@
-/** Feature components receive data and actions from their registered seats. */
-import { Button, Input, Switch, SettingsForm, SettingsValueField, IconSendOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+/** 壳层：总览 / 账号 / 设置三个常驻标签，平台详情推入总览区；设置卡片独立注册。 */
+import { useRef } from 'react'
+import { Button, IconSendOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsRuntime, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import { Calendar, PlatformIcon, RecordRow, SettingsContent, recordDay, statusLabel } from './common.tsx'
+import type { ShellActions } from './common.tsx'
+import { PlatformDetail } from './PlatformDetail.tsx'
 import type { PublishController } from './model.ts'
-import { textFields, numberFields, boolFields, listFields } from './model.ts'
+import type { PageState } from './model.ts'
+import type { TabKey } from './model.ts'
+import { ATTEMPTED, dayKey, platformMeta, platformSummary } from './order.ts'
 import type { Key, Translate } from './locales.ts'
 import { platformLabel } from './locales.ts'
 type Face=ReturnType<PublishController['face']>&{openCenter:()=>void}
@@ -13,87 +19,166 @@ type Bindings=InjectFace<Face>&PropsLocale<'publish.center'>
 type SettingsState=ReturnType<PublishController['settings']['getSnapshot']>
 /** Existing send glyph; the sidebar owns its accessible label. */
 export function PublishIcon({size}:PropsRuntime<'sidebar.panellist'>){return <IconSendOutlineRegular size={size}/>}
-function statusLabel(status:string,t:Translate):string { const keys:Key[]=['prepared','approved','submitting','submitted','published','scheduled','processing','unknown','failed','valid','invalid']; return keys.includes(status as Key)?t(status as Key):t('untested') }
+const TAB_KEYS:{key:TabKey;label:Key}[]=[{key:'overview',label:'overview'},{key:'accounts',label:'accounts'},{key:'settings',label:'settings'}]
 /** The main publishing surface. */
 export function PublishPage(props:PropsRuntime<'main'>&Bindings){
  const {t}=props
- const state=props.usePublishState(s=>s), settings=props.usePublishSettings(s=>s)
- const draft=state.draft, review=state.review
- const configured=state.data?.configuredAccounts??[]
- const spec=state.data?.platforms.find(p=>p.id===draft.platform)
- const accounts=configured.filter(a=>a.platform===draft.platform)
- const disabled=state.busy||!state.data?.publishingEnabled
+ const state=props.usePublishState(s=>s)
+ const settingsState=props.usePublishSettings(s=>s)
+ const month=new Date()
+ const inDetail=state.view.view==='platform'
+ const activeTab:TabKey=inDetail?'overview':state.tab
  return <div className="publish-center">
   <header className="publish-header"><div><h1>{t('title')}</h1><p>{t('description')}</p></div><Button variant="outline" onClick={props.refresh} disabled={state.busy}>{t('refresh')}</Button></header>
-  <nav className="publish-tabs" role="tablist" aria-label={t('title')}>{(['compose','tasks','accounts','settings'] as const).map(tab=><button type="button" role="tab" id={'publish-tab-'+tab} aria-controls={'publish-panel-'+tab} aria-selected={state.tab===tab} key={tab} onClick={()=>props.setTab(tab)}>{t(tab)}</button>)}</nav>
-  <div className="publish-content" role="tabpanel" id={'publish-panel-'+state.tab} aria-labelledby={'publish-tab-'+state.tab}>
+  <nav className="publish-tabs" role="tablist" aria-label={t('title')}>{TAB_KEYS.map(({key,label})=>
+   <button type="button" role="tab" id={'publish-tab-'+key} aria-controls={'publish-panel-'+key} aria-selected={activeTab===key} key={key}
+    onClick={()=>{if(key==='overview'&&inDetail)props.backHome();props.setTab(key)}}>{t(label)}</button>)}</nav>
+  <div className="publish-content" role="tabpanel" id={'publish-panel-'+activeTab} aria-labelledby={'publish-tab-'+activeTab}>
    {state.error&&<div className="publish-notice" role="alert">{state.error}<Button onClick={props.refresh}>{t('retry')}</Button></div>}
    {state.data&&!state.data.publishingEnabled&&<p className="publish-notice">{t('paused')}</p>}
-   {state.tab==='compose'&&<div className="publish-editor">
-    <section className="publish-section">
-     {review?<><h2>{t('confirm')}</h2><p>{t('confirmHint')}</p><dl className="publish-review">
-      <dt>{t('platform')}</dt><dd>{platformLabel(review.request.platform,t)}</dd><dt>{t('account')}</dt><dd>{review.request.account}</dd>
-      <dt>{t('titleField')}</dt><dd>{review.request.title}</dd><dt>{t('body')}</dt><dd className="publish-body">{review.request.body}</dd>
-      <dt>{t('media')}</dt><dd>{review.request.media.map(path=><div key={path}>{path.split(/[\\/]/).pop()}</div>)}</dd>
-      <dt>{t('schedule')}</dt><dd>{review.request.scheduleAt??t('immediate')}</dd>
-      {review.request.visibility&&<><dt>{t('visibility')}</dt><dd>{review.request.visibility}</dd></>}
-      {review.request.isOriginal!==undefined&&<><dt>{t('original')}</dt><dd>{review.request.isOriginal?t('original'):'—'}</dd></>}
-     </dl>{review.plan.warnings.map(w=><p className="publish-notice" key={w}>{w}</p>)}
-     <div className="publish-actions"><Button onClick={()=>props.edit({})} disabled={state.busy}>{t('back')}</Button><Button variant="primary" disabled={disabled} onClick={props.submit}>{state.busy?t('confirming'):t('confirm')}</Button></div></>:
-     <><div className="publish-row">
-      <label>{t('platform')}<select value={draft.platform} onChange={e=>{const platform=e.target.value;const p=state.data?.platforms.find(x=>x.id===platform);props.edit({platform,account:configured.find(a=>a.platform===platform)?.name??'',kind:p?.kinds[0]??'video',scheduleAt:undefined})}}>
-       {(state.data?.platforms??[]).map(p=><option key={p.id} value={p.id} disabled={!!p.blocked}>{platformLabel(p.id,t)}{p.blocked?' · '+t('blocked'):''}</option>)}
-      </select></label>
-      <label>{t('account')}<select value={draft.account} onChange={e=>props.edit({account:e.target.value})}>{accounts.length?accounts.map(a=><option key={a.name}>{a.name}</option>):<option value="">{t('noAccounts')}</option>}</select></label>
-      <label>{t('kind')}<select value={draft.kind} onChange={e=>props.edit({kind:e.target.value as typeof draft.kind,media:[]})}>{(spec?.kinds??['note']).map(kind=><option key={kind} value={kind}>{t(kind)}</option>)}</select></label>
-     </div>
-     {!accounts.length&&<p className="publish-notice">{t('noAccounts')}</p>}
-     <label>{t('titleField')}<Input value={draft.title} onChange={e=>props.edit({title:e.target.value})} maxLength={spec?.titleMaxChars}/></label>
-     <label>{t('body')}<textarea value={draft.body??''} rows={9} onChange={e=>props.edit({body:e.target.value})}/></label>
-     <label>{t('tags')}<Input value={(draft.tags??[]).join(', ')} placeholder={t('tagsHint')} onChange={e=>props.edit({tags:e.target.value.split(/[,，]/).map(x=>x.trim()).filter(Boolean)})}/></label>
-     <div><label className="publish-upload">{t('chooseFiles')}<input type="file" multiple={draft.kind==='note'} disabled={state.busy} accept={draft.kind==='note'?'image/*':draft.kind==='video'?'video/*':'.md,.txt,.html'} onChange={e=>{props.upload(e.target.files);e.target.value=''}}/></label><p>{t('uploadHint')}</p></div>
-     <ul className="publish-files">{draft.media.map(path=><li key={path}><span>{state.attachments.find(x=>x.path===path)?.name??path}</span><Button size="sm" onClick={()=>props.remove(path)} aria-label={t('remove')+' '+path.split(/[\\/]/).pop()}>{t('remove')}</Button></li>)}</ul>
-     <details><summary>{t('paths')}</summary><label>{t('pathsHint')}<textarea rows={3} value={draft.media.join('\n')} onChange={e=>props.edit({media:e.target.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)})}/></label></details>
-     {spec?.scheduling!=='none'&&<label>{t('schedule')}<input type="datetime-local" value={scheduleInput(draft.scheduleAt)} onChange={e=>props.edit({scheduleAt:!e.target.value?undefined:draft.platform==='xiaohongshu'?new Date(e.target.value).toISOString():e.target.value.replace('T',' ')})}/><small>{t('scheduleHint')}</small></label>}
-     {draft.platform==='xiaohongshu'&&<div className="publish-row"><label>{t('visibility')}<select value={draft.visibility??''} onChange={e=>props.edit({visibility:e.target.value||undefined})}><option value="">{t('public')}</option><option value="仅自己可见">{t('private')}</option><option value="仅互关好友可见">{t('mutual')}</option></select></label>{draft.kind==='note'&&<label className="publish-switch">{t('original')}<Switch checked={draft.isOriginal===true} label={t('original')} onChange={value=>props.edit({isOriginal:value})}/></label>}</div>}
-     <Button variant="primary" onClick={props.prepare} disabled={disabled||!draft.title||!draft.media.length||!accounts.length}>{state.busy?t('preflighting'):t('preflight')}</Button></>}
-    </section>
-    <aside className="publish-section publish-preview"><h2>{t('preview')}</h2><div className="publish-preview-meta">{platformLabel(draft.platform,t)} · {draft.account}</div>
-     {draft.media.length?<div className="publish-thumbnails">{draft.media.map(path=>{const item=state.attachments.find(x=>x.path===path);return item?.url?<div key={path}>{item.type.startsWith('video/')?<video src={item.url} controls/>:<img src={item.url} alt={item.name}/>}</div>:<div className="publish-media-label" key={path}>{path.split(/[\\/]/).pop()}</div>})}</div>:<div className="publish-empty-media">{t('noMedia')}</div>}
-     <h3>{draft.title||t('titleField')}</h3><p className="publish-body">{draft.body||t('noBody')}</p><p>{draft.tags?.map(x=>'#'+x).join(' ')}</p><small>{draft.scheduleAt??t('immediate')}</small>
-    </aside>
-   </div>}
-   {state.tab==='tasks'&&<section className="publish-section">
-    <p>{t('submittedHint')}</p>{state.data?.entries.some(x=>x.status==='unknown')&&<p className="publish-notice">{t('unknownHint')}</p>}
-    {state.loading?<p role="status">{t('loading')}</p>:!state.data?.entries.length?<div className="publish-empty">{t('empty')}</div>:<div className="publish-table-scroll"><table><thead><tr><th>{t('taskTitle')}</th><th>{t('account')}</th><th>{t('time')}</th><th>{t('details')}</th></tr></thead><tbody>{state.data.entries.map(entry=><tr key={entry.prepareId}><td><strong>{entry.request.title}</strong><small>{platformLabel(entry.request.platform,t)} · {t(entry.request.kind)}</small></td><td>{entry.request.account}</td><td><span className={'publish-status publish-status-'+entry.status}>{statusLabel(entry.status,t)}</span><small>{new Date(entry.updatedAt).toLocaleString()}</small></td><td><details><summary>{t('details')}</summary><p>{entry.detail??entry.note??t('prepared')}</p><p>{entry.note}</p><code>{entry.prepareId}</code></details></td></tr>)}</tbody></table></div>}
-   </section>}
-   {state.tab==='accounts'&&<section className="publish-section"><div className="publish-section-heading"><h2>{t('accounts')}</h2><Button variant="outline" onClick={props.check} disabled={state.busy}>{state.busy?t('checking'):t('checkAccounts')}</Button></div>
-    <p>{t('accountHelp')}</p><div className="publish-account-status">{configured.map(a=>{const status=state.accounts?.find(s=>s.platform===a.platform&&s.account===a.name);return <div key={a.platform+'/'+a.name}><strong>{platformLabel(a.platform,t)} · {a.name}</strong><span>{statusLabel(status?.status??'',t)}</span>{status?.detail&&<small>{status.detail}</small>}</div>})}</div>
-    <SettingsContent state={settings} t={t} edit={props.editSettings} resetField={props.resetField} save={props.save} discard={props.discard} onlyAccounts/>
-   </section>}
-   {state.tab==='settings'&&<section className="publish-section"><SettingsContent state={settings} t={t} edit={props.editSettings} resetField={props.resetField} save={props.save} discard={props.discard}/><small>{t('ledger')}</small><code className="publish-ledger">{state.data?.ledgerPath}</code></section>}
+   {inDetail
+    ?state.data&&<PlatformDetail state={state} face={props} t={t} month={month} data={state.data}/>
+    :activeTab==='overview'
+     ?state.data&&<Overview state={state} face={props} t={t} month={month} data={state.data}/>
+     :activeTab==='accounts'
+      ?<AccountsSection state={state} settingsState={settingsState} t={t} face={props}/>
+      :<SettingsSection settingsState={settingsState} t={t} face={props} ledgerPath={state.data?.ledgerPath}/>}
   </div>
  </div>
 }
-function scheduleInput(value?:string):string { if(!value)return '';if(!value.includes('T'))return value.replace(' ','T');const date=new Date(value);if(Number.isNaN(date.getTime()))return '';const local=new Date(date.getTime()-date.getTimezoneOffset()*60000);return local.toISOString().slice(0,16) }
-type SettingsProps={state:SettingsState;t:Translate;edit:(key:string,value:string)=>void;resetField:(key:string)=>void;save:()=>void;discard:()=>void;onlyAccounts?:boolean}
-function SettingsContent({state,t,edit,resetField,save,discard,onlyAccounts}:SettingsProps){
- const disabled=!state.writable||state.saving
- const hints:Partial<Record<Key,Key>>={xhsBaseUrl:'xhsBaseUrlHint',sauBin:'sauBinHint',sauCwd:'sauCwdHint',xhsToken:'secretHint',requireApproval:'approvalHint',dailyLimit:'dailyHint',showSidebar:'sidebarHelp',httpTimeoutMs:'timeoutHint',publishTimeoutMs:'timeoutHint',allowedAccounts:'listHint',allowedPlatforms:'listHint'}
- const field=(key:typeof textFields[number]|typeof numberFields[number]|typeof listFields[number])=><SettingsValueField key={key} id={'publish-config-'+key} label={t(key)} hint={hints[key]?t(hints[key]!):undefined} overriddenLabel={t('overridden')} resetLabel={t('reset')} invalidLabel={t('invalidNumber')} numeric={(numberFields as readonly string[]).includes(key)} disabled={disabled} {...state.fields[key]!} onEdit={value=>edit(key,value)} onReset={()=>resetField(key)}/>
- let accounts:{platform:string;name:string;id?:string}[]=[];try{accounts=JSON.parse(state.fields.accounts?.text??'[]')}catch(error){/* The field's invalid state keeps Save disabled. */}
- const update=(rows:typeof accounts)=>edit('accounts',JSON.stringify(rows))
- return <SettingsForm state={state} labels={{unavailable:t('unavailable'),readOnly:t('readOnly'),saveFailed:t('saveFailed'),save:t('save'),saving:t('saving')}} onSave={save} onDiscard={discard}>
-  {onlyAccounts?<div><p>{t('accountHint')}</p>{accounts.map((a,index)=><div className="publish-account-edit" key={a.id??a.platform+'/'+a.name}>
-   <label>{t('platform')}<select value={a.platform} disabled={disabled} onChange={e=>update(accounts.map((x,i)=>i===index?{...x,id:x.id??x.platform+'/'+x.name,platform:e.target.value}:x))}>{['xiaohongshu','douyin','kuaishou','tencent','dayu','baijiahao','alipay','weibo','hupu','zhihu','xueqiu','youtube'].map(id=><option key={id} value={id}>{platformLabel(id,t)}</option>)}</select></label>
-   <label>{t('account')}<Input value={a.name} disabled={disabled} onChange={e=>update(accounts.map((x,i)=>i===index?{...x,id:x.id??x.platform+'/'+x.name,name:e.target.value}:x))}/></label><Button disabled={disabled} onClick={()=>update(accounts.filter((_,i)=>i!==index))}>{t('remove')}</Button>
-  </div>)}<Button onClick={()=>update([...accounts,{id:crypto.randomUUID(),platform:'douyin',name:''}])} disabled={disabled}>{t('addAccount')}</Button></div>:<>
-   <h2>{t('appearance')}</h2><p>{t('sidebarHelp')}</p>{boolFields.slice(0,2).map(key=><label className="publish-switch" key={key}><span>{t(key)}</span><Switch checked={state.fields[key]?.text==='true'} label={t(key)} disabled={disabled} onChange={value=>edit(key,String(value))}/></label>)}
-   <h2>{t('runtime')}</h2>{textFields.filter(key=>key!=='xhsToken').map(field)}<label>{t('xhsToken')}<Input type="password" autoComplete="new-password" value={state.fields.xhsToken?.text??''} disabled={disabled} onChange={e=>edit('xhsToken',e.target.value)}/><small>{t('secretHint')}</small></label><label className="publish-switch"><span>{t('headed')}</span><Switch checked={state.fields.headed?.text==='true'} label={t('headed')} disabled={disabled} onChange={value=>edit('headed',String(value))}/></label>
-   <h2>{t('behavior')}</h2><label className="publish-switch"><span>{t('requireApproval')}<small>{t('approvalHint')}</small></span><Switch checked={state.fields.requireApproval?.text==='true'} label={t('requireApproval')} disabled={disabled} onChange={value=>edit('requireApproval',String(value))}/></label>{field('dailyLimit')}{listFields.map(field)}
-   <h2>{t('limits')}</h2>{numberFields.filter(key=>key!=='dailyLimit').map(field)}
-  </>}
- </SettingsForm>
+/** 总览：心跳条 + 可拖拽平台卡片 + 更多平台 + 全局日历。 */
+function Overview({state,face,t,month,data}:{state:PageState;face:ShellActions;t:Translate;month:Date;data:NonNullable<PageState['data']>}){
+ const order=(state.dragOrder??data.homeCards).filter(id=>data.platforms.some(p=>p.id===id))
+ const seen=new Set<string>();const orderIds=order.filter(id=>seen.has(id)?false:seen.add(id))
+ const todayKey=dayKey(month)
+ const monthPrefix=todayKey.slice(0,7)
+ const attempted=(status:string)=>ATTEMPTED.includes(status)
+ const todayCount=data.entries.filter(e=>recordDay(e)===todayKey&&attempted(e.status)).length
+ const monthCount=data.entries.filter(e=>recordDay(e).startsWith(monthPrefix)&&attempted(e.status)).length
+ const unknownCount=data.entries.filter(e=>e.status==='unknown').length
+ const scheduledCount=data.entries.filter(e=>e.status==='scheduled').length
+ const monthEntries=data.entries.filter(e=>recordDay(e).startsWith(monthPrefix))
+ const legend=[...new Set(monthEntries.map(e=>e.request.platform))].map(id=>({color:platformMeta(id).bg,label:platformLabel(id,t)}))
+ const dayEntries=state.selectedDate?data.entries.filter(e=>recordDay(e)===state.selectedDate):[]
+ const drag=useRef<string|null>(null)
+ // 重排会移动卡片 DOM 节点，Chrome 会随节点移动释放指针捕获；
+ // 因此拖拽监听挂 window，而不是拖拽手柄元素。
+ const onDown=(id:string)=>(event:React.PointerEvent<HTMLSpanElement>)=>{
+  drag.current=id
+  event.preventDefault()
+  const onMove=(ev:PointerEvent)=>{
+   const current=drag.current;if(!current)return
+   const target=(document.elementFromPoint(ev.clientX,ev.clientY) as HTMLElement|null)?.closest('.publish-pcard[data-platform]')
+   const targetId=target?.getAttribute('data-platform')
+   if(targetId&&targetId!==current)face.reorder(current,targetId)
+  }
+  const finish=(commit:boolean)=>{
+   window.removeEventListener('pointermove',onMove)
+   window.removeEventListener('pointerup',onUp)
+   window.removeEventListener('pointercancel',onCancel)
+   const current=drag.current
+   drag.current=null
+   if(commit&&current)face.commitOrder()
+   if(!commit&&current)face.cancelDrag()
+  }
+  const onUp=()=>finish(true)
+  const onCancel=()=>finish(false)
+  window.addEventListener('pointermove',onMove)
+  window.addEventListener('pointerup',onUp)
+  window.addEventListener('pointercancel',onCancel)
+ }
+ return <>
+  <div className="publish-statstrip">
+   <div className="publish-stat"><b>{todayCount}</b><span>{t('todayPublished')}</span></div>
+   <div className="publish-stat"><b>{monthCount}</b><span>{t('monthPublished')}</span></div>
+   <div className="publish-stat"><b>{unknownCount}</b><span>{t('pendingCount')}</span></div>
+   <div className="publish-stat"><b>{scheduledCount}</b><span>{t('scheduledCount')}</span></div>
+  </div>
+  <div className="publish-cards">
+   {orderIds.map(id=>{
+    const spec=data.platforms.find(p=>p.id===id)!
+    const accounts=data.configuredAccounts.filter(a=>a.platform===id)
+    const checks=state.accounts?.filter(s=>s.platform===id)??[]
+    const invalid=checks.some(s=>s.status==='invalid')
+    const platformEntries=data.entries.filter(e=>e.request.platform===id)
+    const platformMonth=platformEntries.filter(e=>recordDay(e).startsWith(monthPrefix)&&attempted(e.status))
+    const platformUnknown=platformEntries.filter(e=>e.status==='unknown').length
+    const platformScheduled=platformEntries.filter(e=>e.status==='scheduled').length
+    const badge=spec.blocked?<span className="chip c-muted">{t('blocked')}</span>
+     :spec.acceptance==='pending'?<span className="chip c-warn">{t('pendingAcceptance')}</span>
+     :!accounts.length?<span className="chip c-muted">{t('notConfigured')}</span>
+     :invalid?<span className="chip c-unknown">{t('invalid')}</span>
+     :checks.length?<span className="chip c-ok">{t('valid')}</span>:<span className="chip c-muted">{t('notChecked')}</span>
+    return <div className="publish-pcard" key={id} data-platform={id}>
+     {!spec.blocked&&<span className="publish-drag" aria-hidden onPointerDown={onDown(id)}>⠿</span>}
+     <div className="publish-pcard-head">
+      <PlatformIcon id={id} size={34}/>
+      <div><div className="publish-pname">{platformLabel(id,t)}</div><div className="publish-pmeta">{platformSummary(spec)}</div></div>
+      {badge}
+     </div>
+     <div className="publish-accs">{accounts.map(a=>{
+      const st=checks.find(s=>s.account===a.name)
+      return <span className="publish-acc" key={a.name}><i className="dot" style={{background:st?.status==='invalid'?'#d97917':'#0d8a55'}}/>{a.name}</span>})}</div>
+     <div className="publish-nums">
+      <div><b>{platformMonth.length}</b><span>{t('monthPublished')}</span></div>
+      <div><b>{platformUnknown}</b><span>{t('pendingCount')}</span></div>
+      <div><b>{platformScheduled}</b><span>{t('scheduledCount')}</span></div>
+     </div>
+     <div className="publish-minilist">{platformEntries.slice(0,3).map(entry=>
+      <div className="publish-minilist-row" key={entry.prepareId}><span className="t">{entry.request.title}</span><span className={'chip publish-status publish-status-'+entry.status}>{statusLabel(entry.status,t)}</span><span className="d">{recordDay(entry).slice(5)}</span></div>)}
+     </div>
+     {spec.blocked&&<div className="publish-na">{spec.blocked}</div>}
+     <div className="publish-actions">
+      {!spec.blocked&&<Button variant="primary" onClick={()=>face.openPlatform(id)}>{t('newPost')}</Button>}
+      <Button variant="outline" onClick={()=>face.openPlatform(id)}>{t('viewPlatform')}</Button>
+      {invalid&&<Button variant="outline" onClick={face.check} disabled={state.busy}>{t('checkAccounts')}</Button>}
+      {!accounts.length&&<Button variant="outline" onClick={()=>face.setTab('accounts')}>{t('addAccount')}</Button>}
+     </div>
+    </div>})}
+   <div className="publish-pcard publish-more-card">
+    <div className="publish-pcard-head">
+     <span className="publish-pico" style={{background:'#e3e5e8',color:'#646a73',fontSize:16}}>＋</span>
+     <div><div className="publish-pname">{t('morePlatforms')}</div><div className="publish-pmeta">{t('morePlatformsHint')}</div></div>
+    </div>
+    <div className="publish-actions"><Button variant="outline" onClick={face.toggleMore}>{t('openMorePanel')}</Button></div>
+   </div>
+  </div>
+  {state.moreOpen&&<div className="publish-morepanel">
+   <h3>{t('morePlatforms')}</h3>
+   {data.platforms.map(spec=>{
+    const inHome=data.homeCards.includes(spec.id)
+    return <div className="publish-more-row" key={spec.id}>
+     <PlatformIcon id={spec.id} size={24}/>
+     <span className="nm">{platformLabel(spec.id,t)}</span>
+     <span className="st">{platformSummary(spec)}{spec.acceptance==='pending'?' · '+t('pendingAcceptance'):''}</span>
+     <Button size="sm" variant="outline" onClick={()=>inHome?face.removeMore(spec.id):face.addMore(spec.id)}>{inHome?t('removeFromHome'):t('addToHome')}</Button>
+    </div>})}
+  </div>}
+  <Calendar entries={monthEntries} colorFor={e=>platformMeta(e.request.platform).bg} selected={state.selectedDate} onSelect={face.selectDate} month={month} title={t('globalCalendar')} legend={legend} t={t}/>
+  {state.selectedDate&&<section className="publish-section">
+   <h2>{t('dayRecords')} · {state.selectedDate}</h2>
+   {dayEntries.length===0?<div className="publish-empty">{t('empty')}</div>:dayEntries.map(entry=><RecordRow key={entry.prepareId} entry={entry} t={t}/>)}
+  </section>}
+ </>
+}
+function AccountsSection({state,settingsState,t,face}:{state:PageState;settingsState:SettingsState;t:Translate;face:ShellActions}){
+ const data=state.data
+ const configured=data?.configuredAccounts??[]
+ return <section className="publish-section">
+  <div className="publish-section-heading"><h2>{t('accounts')}</h2><Button variant="outline" onClick={face.check} disabled={state.busy}>{state.busy?t('checking'):t('checkAccounts')}</Button></div>
+  <p>{t('accountHelp')}</p>
+  <div className="publish-account-status">{configured.map(a=>{
+   const status=state.accounts?.find(s=>s.platform===a.platform&&s.account===a.name)
+   return <div key={a.platform+'/'+a.name}><strong>{platformLabel(a.platform,t)} · {a.name}</strong><span>{statusLabel(status?.status??'',t)}</span>{status?.detail&&<small>{status.detail}</small>}</div>})}
+  </div>
+  <SettingsContent state={settingsState} t={t} edit={face.editSettings} resetField={face.resetField} save={face.save} discard={face.discard} onlyAccounts/>
+ </section>
+}
+function SettingsSection({settingsState,t,face,ledgerPath}:{settingsState:SettingsState;t:Translate;face:ShellActions;ledgerPath?:string}){
+ return <section className="publish-section">
+  <SettingsContent state={settingsState} t={t} edit={face.editSettings} resetField={face.resetField} save={face.save} discard={face.discard}/>
+  <small>{t('ledger')}</small><code className="publish-ledger">{ledgerPath}</code>
+ </section>
 }
 /** Settings remain reachable when the sidebar entry is hidden. */
 export function PublishSettings(props:PropsRuntime<'plugins.item'>&Bindings){

@@ -10,7 +10,10 @@ const require=createRequire(resolve(process.env.DSH_SOURCE??root,'package.json')
 const {build}=require('esbuild')
 const dir=await mkdtemp(join(tmpdir(),'publish-tests-'))
 try{
- const output=join(dir,'runtime.test.mjs')
- await build({entryPoints:[join(root,'tests/runtime.test.mjs')],outfile:output,bundle:true,platform:'node',format:'esm',nodePaths:process.env.DSH_SOURCE?[join(process.env.DSH_SOURCE,'node_modules')]:[]})
- execFileSync(process.execPath,['--test',output],{stdio:'inherit'})
+ const entries=['tests/runtime.test.mjs','tests/order.test.mjs']
+ for(const entry of entries){
+  const output=join(dir,entry.replace(/\//g,'-'))
+  await build({entryPoints:[join(root,entry)],outfile:output,bundle:true,platform:'node',format:'esm',nodePaths:process.env.DSH_SOURCE?[join(process.env.DSH_SOURCE,'node_modules')]:[]})
+  execFileSync(process.execPath,['--test',output],{stdio:'inherit'})
+ }
 }finally{if(!dir.startsWith(resolve(tmpdir())+sep))throw new Error('Unexpected test directory');await rm(dir,{recursive:true,force:true})}

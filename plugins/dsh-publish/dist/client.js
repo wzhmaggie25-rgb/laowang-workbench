@@ -29,6 +29,74 @@ module.exports = __toCommonJS(index_exports);
 // src/client/model.ts
 var import_dsh_client_store = require("@deepseek-ai/dsh-client-store");
 var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+
+// src/client/order.ts
+var PLATFORM_META = {
+  xiaohongshu: { bg: "#ff2442", letter: "\u4E66" },
+  douyin: { bg: "#161823", letter: "\u97F3" },
+  tencent: { bg: "#fa9d3b", letter: "\u53F7" },
+  kuaishou: { bg: "#ff6600", letter: "\u624B" },
+  zhihu: { bg: "#0084ff", letter: "\u77E5" },
+  dayu: { bg: "#3a76c9", letter: "\u9C7C" },
+  xueqiu: { bg: "#2e68b5", letter: "\u96EA" },
+  bilibili: { bg: "#fb7299", letter: "B" },
+  weibo: { bg: "#e6162d", letter: "\u5FAE" },
+  hupu: { bg: "#c9151e", letter: "\u864E" },
+  baijiahao: { bg: "#2932e1", letter: "\u767E" },
+  youtube: { bg: "#ff0000", letter: "\u25B6" },
+  alipay: { bg: "#1677ff", letter: "\u652F" }
+};
+var platformMeta = (id) => PLATFORM_META[id] ?? { bg: "#646a73", letter: id.slice(0, 1).toUpperCase() };
+var STATUS_COLOR = {
+  published: "#0d8a55",
+  scheduled: "#7a3db8",
+  unknown: "#b25e09",
+  failed: "#d92d20",
+  submitting: "#2a5bd7",
+  submitted: "#2a5bd7",
+  processing: "#646a73",
+  prepared: "#8f959e",
+  approved: "#8f959e"
+};
+var statusColor = (status) => STATUS_COLOR[status] ?? "#8f959e";
+var ATTEMPTED = ["submitting", "submitted", "published", "scheduled", "processing", "unknown"];
+function dayKey(date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+function entryDayKey(entry) {
+  const scheduled = entry.request.scheduleAt?.slice(0, 10);
+  return scheduled ?? entry.submittedAt?.slice(0, 10) ?? entry.updatedAt.slice(0, 10);
+}
+function moveCard(order, dragId, targetId) {
+  const dragIndex = order.indexOf(dragId);
+  const targetIndex = order.indexOf(targetId);
+  if (dragIndex === -1 || targetIndex === -1 || dragIndex === targetIndex) return [...order];
+  const known = order.filter((id) => id !== dragId);
+  const at = known.indexOf(targetId);
+  const insertAt = dragIndex < targetIndex ? at + 1 : at;
+  return [...known.slice(0, insertAt), dragId, ...known.slice(insertAt)];
+}
+function buildMonth(now) {
+  const year = now.getFullYear(), month = now.getMonth();
+  const offset = (new Date(year, month, 1).getDay() + 6) % 7;
+  const total = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < offset; i += 1) cells.push({ day: null, key: "" });
+  for (let day = 1; day <= total; day += 1) {
+    cells.push({ day, key: `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}` });
+  }
+  while (cells.length % 7 !== 0) cells.push({ day: null, key: "" });
+  return cells;
+}
+function platformSummary(spec) {
+  const kinds = spec.kinds.join(" / ");
+  const schedule = spec.scheduling === "none" ? "\u4E0D\u652F\u6301\u5B9A\u65F6" : "\u652F\u6301\u5B9A\u65F6";
+  return spec.blocked ? `${kinds} \xB7 ${spec.blocked}` : `${kinds} \xB7 ${schedule}`;
+}
+
+// src/client/model.ts
 var textFields = ["xhsBaseUrl", "xhsToken", "sauBin", "sauCwd", "dailyTimeZone"];
 var numberFields = ["approvalTimeoutSec", "dailyLimit", "httpTimeoutMs", "publishTimeoutMs", "maxMediaBytes"];
 var boolFields = ["showSidebar", "publishingEnabled", "requireApproval", "headed"];
@@ -45,16 +113,18 @@ var accountsSpec = { field: "accounts", format: (value) => JSON.stringify(value 
   }
 } };
 var PublishController = class {
-  form;
-  settings;
-  state = (0, import_dsh_client_store.createSnapshotStore)({ loading: true, busy: false, draft: { platform: "xiaohongshu", account: "default", kind: "note", title: "", body: "", media: [] }, attachments: [], tab: "compose" });
-  abort = new AbortController();
-  timer;
-  generation = 0;
   constructor(scope) {
+    this.scope = scope;
     this.form = new import_dsh_client_ui_primitives.SettingsFormModel(scope, [...textFields.map((x) => (0, import_dsh_client_ui_primitives.settingsTextField)(x)), ...numberFields.map((x) => (0, import_dsh_client_ui_primitives.settingsNumberField)(x)), ...boolFields.map(booleanSpec), ...listFields.map(listSpec), accountsSpec]);
     this.settings = this.form.bind(() => ({ ...this.form.shell(), fields: Object.fromEntries([...textFields, ...numberFields, ...boolFields, ...listFields, "accounts"].map((key) => [key, this.form.field(key)])) }));
   }
+  scope;
+  form;
+  settings;
+  state = (0, import_dsh_client_store.createSnapshotStore)({ loading: true, busy: false, draft: { platform: "douyin", account: "", kind: "note", title: "", body: "", media: [] }, attachments: [], view: { view: "home" }, tab: "overview", moreOpen: false });
+  abort = new AbortController();
+  timer;
+  generation = 0;
   async call(endpoint, payload = {}) {
     const response = await fetch("api/publish/" + endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: this.abort.signal, credentials: "same-origin" });
     const result = await response.json();
@@ -67,15 +137,21 @@ var PublishController = class {
       const data = await this.call("state");
       if (generation !== this.generation || this.abort.signal.aborted) return;
       this.state.update((s) => {
-        if (!s.data && !data.configuredAccounts.some((a) => a.platform === s.draft.platform) && data.configuredAccounts[0]) {
-          const first = data.configuredAccounts[0];
-          s.draft.platform = first.platform;
-          s.draft.kind = data.platforms.find((p) => p.id === first.platform)?.kinds[0] ?? "video";
+        if (s.view.view === "platform") {
+          const platform = s.view.platform;
+          if (!data.configuredAccounts.some((a) => a.platform === platform)) {
+            s.view = { view: "home" };
+            s.review = void 0;
+          }
         }
-        const accounts = data.configuredAccounts.filter((a) => a.platform === s.draft.platform);
-        if (!accounts.some((a) => a.name === s.draft.account)) {
-          s.draft.account = accounts[0]?.name ?? "";
-          s.review = void 0;
+        if (!s.data && !s.dragOrder) {
+          const first = [...data.homeCards].find((id) => data.platforms.some((p) => p.id === id && !p.blocked && data.configuredAccounts.some((a) => a.platform === id)));
+          const spec = data.platforms.find((p) => p.id === first);
+          if (spec) {
+            s.draft.platform = spec.id;
+            s.draft.kind = spec.kinds[0];
+            s.draft.account = data.configuredAccounts.find((a) => a.platform === spec.id)?.name ?? "";
+          }
         }
         s.data = data;
         s.loading = false;
@@ -99,9 +175,100 @@ var PublishController = class {
       s.error = void 0;
     });
   }
-  tab(tab) {
+  openPlatform(platform) {
+    this.state.update((s) => {
+      const spec = s.data?.platforms.find((p) => p.id === platform);
+      if (!spec) return;
+      s.view = { view: "platform", platform };
+      s.tab = "overview";
+      s.detailAccount = void 0;
+      s.review = void 0;
+      s.error = void 0;
+      s.draft = { platform, account: s.data?.configuredAccounts.find((a) => a.platform === platform)?.name ?? "", kind: spec.kinds[0], title: "", media: [], body: "", tags: [] };
+    });
+  }
+  backHome() {
+    this.state.update((s) => {
+      s.view = { view: "home" };
+      s.review = void 0;
+    });
+  }
+  setTab(tab) {
     this.state.update((s) => {
       s.tab = tab;
+    });
+  }
+  setDetailAccount(account) {
+    this.state.update((s) => {
+      s.detailAccount = account || void 0;
+    });
+  }
+  toggleMore() {
+    this.state.update((s) => {
+      s.moreOpen = !s.moreOpen;
+    });
+  }
+  selectDate(key) {
+    this.state.update((s) => {
+      s.selectedDate = s.selectedDate === key ? void 0 : key;
+    });
+  }
+  /** 拖拽预览：只改本地顺序，放置时 commitOrder 才落库。 */
+  reorder(dragId, targetId) {
+    this.state.update((s) => {
+      const base = s.dragOrder ?? s.data?.homeCards;
+      if (!base) return;
+      s.dragOrder = moveCard(base, dragId, targetId);
+    });
+  }
+  cancelDrag() {
+    this.state.update((s) => {
+      s.dragOrder = void 0;
+    });
+  }
+  /** 一次修订围栏写入；成功后本地 data 即刻对齐，失败返回 false 交给调用方报错。 */
+  async writeHomeCards(order) {
+    const accepted = await this.scope.mutate([{ op: "set", path: ["homeCards"], value: order }]);
+    if (this.abort.signal.aborted) return false;
+    if (accepted) this.state.update((s) => {
+      if (s.data) s.data.homeCards = order;
+      s.dragOrder = void 0;
+      s.error = void 0;
+    });
+    return accepted;
+  }
+  /** 放置即保存；失败保留本地预览顺序并报错，刷新后以服务端为准。 */
+  async commitOrder() {
+    const snapshot = this.state.getSnapshot();
+    const order = snapshot.dragOrder;
+    if (!order || !snapshot.data) return;
+    if (JSON.stringify(order) === JSON.stringify(snapshot.data.homeCards)) {
+      this.state.update((s) => {
+        s.dragOrder = void 0;
+      });
+      return;
+    }
+    const accepted = await this.writeHomeCards(order);
+    if (!accepted && !this.abort.signal.aborted) this.state.update((s) => {
+      s.error = "\u5361\u7247\u987A\u5E8F\u4FDD\u5B58\u672A\u6210\u529F\uFF0C\u5DF2\u4FDD\u7559\u672C\u6B21\u6392\u5217\uFF1B\u8BF7\u91CD\u8BD5";
+    });
+  }
+  /** 「更多平台」面板：把平台加入主页末尾。 */
+  async addMore(id) {
+    const snapshot = this.state.getSnapshot();
+    if (!snapshot.data || snapshot.data.homeCards.includes(id)) return;
+    const accepted = await this.writeHomeCards([...snapshot.data.homeCards, id]);
+    if (!accepted && !this.abort.signal.aborted) this.state.update((s) => {
+      s.error = "\u5361\u7247\u987A\u5E8F\u4FDD\u5B58\u672A\u6210\u529F\uFF0C\u8BF7\u91CD\u8BD5";
+    });
+  }
+  /** 「更多平台」面板：把平台从主页挪回面板，不动账号与台账。 */
+  async removeMore(id) {
+    const snapshot = this.state.getSnapshot();
+    if (!snapshot.data) return;
+    const accepted = await this.writeHomeCards(snapshot.data.homeCards.filter((card) => card !== id));
+    if (!accepted && !this.abort.signal.aborted) this.state.update((s) => {
+      s.error = "\u5361\u7247\u987A\u5E8F\u4FDD\u5B58\u672A\u6210\u529F\uFF0C\u8BF7\u91CD\u8BD5";
     });
   }
   async action(work) {
@@ -138,7 +305,6 @@ var PublishController = class {
       if (!result.accepted) throw new Error(result.detail);
       this.state.update((s) => {
         s.review = void 0;
-        s.tab = "tasks";
       });
       await this.refresh();
     });
@@ -178,7 +344,13 @@ var PublishController = class {
   }
   face() {
     const { edit: editSettings, ...actions } = this.form.actions();
-    return { hooks: { publishState: this.state, publishSettings: this.settings }, edit: (patch) => this.edit(patch), setTab: (tab) => this.tab(tab), refresh: () => {
+    return { hooks: { publishState: this.state, publishSettings: this.settings }, edit: (patch) => this.edit(patch), openPlatform: (platform) => this.openPlatform(platform), backHome: () => this.backHome(), setTab: (tab) => this.setTab(tab), setDetailAccount: (account) => this.setDetailAccount(account), toggleMore: () => this.toggleMore(), selectDate: (key) => this.selectDate(key), reorder: (dragId, targetId) => this.reorder(dragId, targetId), commitOrder: () => {
+      void this.commitOrder();
+    }, cancelDrag: () => this.cancelDrag(), addMore: (id) => {
+      void this.addMore(id);
+    }, removeMore: (id) => {
+      void this.removeMore(id);
+    }, refresh: () => {
       void this.refresh();
     }, check: () => {
       void this.check();
@@ -202,6 +374,10 @@ function message(error) {
 }
 
 // src/client/Page.tsx
+var import_react = require("react");
+var import_dsh_client_ui_primitives4 = require("@deepseek-ai/dsh-client-ui-primitives");
+
+// src/client/common.tsx
 var import_dsh_client_ui_primitives2 = require("@deepseek-ai/dsh-client-ui-primitives");
 
 // src/client/locales.ts
@@ -319,6 +495,34 @@ var zh = {
   notReady: "\u8BF7\u7B49\u5F85\u63D2\u4EF6\u8FDE\u63A5",
   blocked: "\u6682\u672A\u652F\u6301",
   summary: "\u53D1\u5E03\u3001\u8D26\u53F7\u3001\u4EFB\u52A1\u8BB0\u5F55\u4E0E\u4E0A\u4F20\u5F15\u64CE\u8BBE\u7F6E",
+  overview: "\u603B\u89C8",
+  backToOverview: "\u8FD4\u56DE\u603B\u89C8",
+  viewPlatform: "\u67E5\u770B\u8BE5\u5E73\u53F0",
+  newPost: "\u65B0\u5EFA\u53D1\u5E03",
+  morePlatforms: "\u66F4\u591A\u5E73\u53F0",
+  morePlatformsHint: "\u5DF2\u767B\u8BB0\u7684\u5E73\u53F0\u90FD\u4F1A\u5728\u8FD9\u91CC\uFF0C\u5E26\u5F15\u64CE\u80CC\u4E66\u4E0E\u9650\u5236\u8BF4\u660E",
+  openMorePanel: "\u6253\u5F00\u9762\u677F",
+  addToHome: "\u6DFB\u52A0\u5230\u4E3B\u9875",
+  removeFromHome: "\u4ECE\u4E3B\u9875\u79FB\u9664",
+  pendingAcceptance: "\u5F85\u53D7\u63A7\u9A8C\u6536",
+  notChecked: "\u672A\u68C0\u67E5",
+  notConfigured: "\u672A\u914D\u7F6E",
+  todayPublished: "\u4ECA\u65E5\u5DF2\u53D1",
+  monthPublished: "\u672C\u6708\u5DF2\u53D1",
+  pendingCount: "\u5F85\u6838\u5B9E",
+  scheduledCount: "\u5DF2\u6392\u671F",
+  globalCalendar: "\u53D1\u5E03\u65E5\u5386\uFF08\u5168\u5C40 \xB7 \u70B9\u65E5\u671F\u8FC7\u6EE4\uFF09",
+  dayRecords: "\u5F53\u65E5\u8BB0\u5F55",
+  monthRhythm: "\u672C\u6708\u8282\u594F",
+  platformOnly: "\u4EC5\u672C\u5E73\u53F0",
+  allAccounts: "\u5168\u90E8\u8D26\u53F7",
+  wd1: "\u4E00",
+  wd2: "\u4E8C",
+  wd3: "\u4E09",
+  wd4: "\u56DB",
+  wd5: "\u4E94",
+  wd6: "\u516D",
+  wd7: "\u65E5",
   "platform.xiaohongshu": "\u5C0F\u7EA2\u4E66",
   "platform.douyin": "\u6296\u97F3",
   "platform.kuaishou": "\u5FEB\u624B",
@@ -448,6 +652,34 @@ var en = {
   notReady: "Waiting for the plugin connection",
   blocked: "Unavailable",
   summary: "Publishing, accounts, records and engine settings",
+  overview: "Overview",
+  backToOverview: "Back to overview",
+  viewPlatform: "Open platform",
+  newPost: "New post",
+  morePlatforms: "More platforms",
+  morePlatformsHint: "Every registered platform lives here, with engines and limitations stated",
+  openMorePanel: "Open panel",
+  addToHome: "Add to home",
+  removeFromHome: "Remove from home",
+  pendingAcceptance: "Pending acceptance",
+  notChecked: "Not checked",
+  notConfigured: "Not configured",
+  todayPublished: "Today",
+  monthPublished: "This month",
+  pendingCount: "To verify",
+  scheduledCount: "Scheduled",
+  globalCalendar: "Calendar (global \xB7 click a date to filter)",
+  dayRecords: "Records on this day",
+  monthRhythm: "This month",
+  platformOnly: "This platform only",
+  allAccounts: "All accounts",
+  wd1: "Mon",
+  wd2: "Tue",
+  wd3: "Wed",
+  wd4: "Thu",
+  wd5: "Fri",
+  wd6: "Sat",
+  wd7: "Sun",
   "platform.xiaohongshu": "Xiaohongshu",
   "platform.douyin": "Douyin",
   "platform.kuaishou": "Kuaishou",
@@ -468,231 +700,81 @@ function platformLabel(id, t) {
   return key in zh ? t(key) : id;
 }
 
-// src/client/Page.tsx
+// src/client/common.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
-function PublishIcon({ size }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.IconSendOutlineRegular, { size });
-}
+var STATUS_KEYS = ["prepared", "approved", "submitting", "submitted", "published", "scheduled", "processing", "unknown", "failed", "valid", "invalid"];
 function statusLabel(status, t) {
-  const keys = ["prepared", "approved", "submitting", "submitted", "published", "scheduled", "processing", "unknown", "failed", "valid", "invalid"];
-  return keys.includes(status) ? t(status) : t("untested");
+  return STATUS_KEYS.includes(status) ? t(status) : t("untested");
 }
-function PublishPage(props) {
-  const { t } = props;
-  const state = props.usePublishState((s) => s), settings = props.usePublishSettings((s) => s);
-  const draft = state.draft, review = state.review;
-  const configured = state.data?.configuredAccounts ?? [];
-  const spec = state.data?.platforms.find((p) => p.id === draft.platform);
-  const accounts = configured.filter((a) => a.platform === draft.platform);
-  const disabled = state.busy || !state.data?.publishingEnabled;
-  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-center", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("header", { className: "publish-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h1", { children: t("title") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: t("description") })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { variant: "outline", onClick: props.refresh, disabled: state.busy, children: t("refresh") })
+function PlatformIcon({ id, size }) {
+  const meta = platformMeta(id);
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-pico", style: { background: meta.bg, fontSize: Math.round(size * 0.45) }, "aria-hidden": true, children: meta.letter });
+}
+var recordDay = (entry) => entryDayKey(entry);
+function Calendar({ entries, colorFor, selected, onSelect, month, title, legend, t, interactive = true }) {
+  const cells = buildMonth(month);
+  const byDay = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    const key = recordDay(entry);
+    byDay.set(key, [...byDay.get(key) ?? [], entry]);
+  }
+  const monthValue = String(month.getMonth() + 1).padStart(2, "0");
+  const today = month.getFullYear() + "-" + monthValue + "-" + String((/* @__PURE__ */ new Date()).getDate()).padStart(2, "0");
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-cal", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-cal-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: title }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-cal-legend", children: legend.map((item) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { className: "dot", style: { background: item.color } }),
+        item.label
+      ] }, item.label)) })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("nav", { className: "publish-tabs", role: "tablist", "aria-label": t("title"), children: ["compose", "tasks", "accounts", "settings"].map((tab) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", role: "tab", id: "publish-tab-" + tab, "aria-controls": "publish-panel-" + tab, "aria-selected": state.tab === tab, onClick: () => props.setTab(tab), children: t(tab) }, tab)) }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-content", role: "tabpanel", id: "publish-panel-" + state.tab, "aria-labelledby": "publish-tab-" + state.tab, children: [
-      state.error && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-notice", role: "alert", children: [
-        state.error,
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { onClick: props.refresh, children: t("retry") })
-      ] }),
-      state.data && !state.data.publishingEnabled && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-notice", children: t("paused") }),
-      state.tab === "compose" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-editor", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("section", { className: "publish-section", children: review ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", { children: t("confirm") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: t("confirmHint") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("dl", { className: "publish-review", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("platform") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: platformLabel(review.request.platform, t) }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("account") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.account }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("titleField") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.title }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("body") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { className: "publish-body", children: review.request.body }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("media") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.media.map((path) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { children: path.split(/[\\/]/).pop() }, path)) }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("schedule") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.scheduleAt ?? t("immediate") }),
-            review.request.visibility && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("visibility") }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.visibility })
-            ] }),
-            review.request.isOriginal !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dt", { children: t("original") }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("dd", { children: review.request.isOriginal ? t("original") : "\u2014" })
-            ] })
-          ] }),
-          review.plan.warnings.map((w) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-notice", children: w }, w)),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-actions", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { onClick: () => props.edit({}), disabled: state.busy, children: t("back") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { variant: "primary", disabled, onClick: props.submit, children: state.busy ? t("confirming") : t("confirm") })
-          ] })
-        ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-              t("platform"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("select", { value: draft.platform, onChange: (e) => {
-                const platform = e.target.value;
-                const p = state.data?.platforms.find((x) => x.id === platform);
-                props.edit({ platform, account: configured.find((a) => a.platform === platform)?.name ?? "", kind: p?.kinds[0] ?? "video", scheduleAt: void 0 });
-              }, children: (state.data?.platforms ?? []).map((p) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("option", { value: p.id, disabled: !!p.blocked, children: [
-                platformLabel(p.id, t),
-                p.blocked ? " \xB7 " + t("blocked") : ""
-              ] }, p.id)) })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-              t("account"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("select", { value: draft.account, onChange: (e) => props.edit({ account: e.target.value }), children: accounts.length ? accounts.map((a) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { children: a.name }, a.name)) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "", children: t("noAccounts") }) })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-              t("kind"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("select", { value: draft.kind, onChange: (e) => props.edit({ kind: e.target.value, media: [] }), children: (spec?.kinds ?? ["note"]).map((kind) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: kind, children: t(kind) }, kind)) })
-            ] })
-          ] }),
-          !accounts.length && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-notice", children: t("noAccounts") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-            t("titleField"),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Input, { value: draft.title, onChange: (e) => props.edit({ title: e.target.value }), maxLength: spec?.titleMaxChars })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-            t("body"),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("textarea", { value: draft.body ?? "", rows: 9, onChange: (e) => props.edit({ body: e.target.value }) })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-            t("tags"),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Input, { value: (draft.tags ?? []).join(", "), placeholder: t("tagsHint"), onChange: (e) => props.edit({ tags: e.target.value.split(/[,，]/).map((x) => x.trim()).filter(Boolean) }) })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "publish-upload", children: [
-              t("chooseFiles"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { type: "file", multiple: draft.kind === "note", disabled: state.busy, accept: draft.kind === "note" ? "image/*" : draft.kind === "video" ? "video/*" : ".md,.txt,.html", onChange: (e) => {
-                props.upload(e.target.files);
-                e.target.value = "";
-              } })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: t("uploadHint") })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ul", { className: "publish-files", children: draft.media.map((path) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("li", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: state.attachments.find((x) => x.path === path)?.name ?? path }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { size: "sm", onClick: () => props.remove(path), "aria-label": t("remove") + " " + path.split(/[\\/]/).pop(), children: t("remove") })
-          ] }, path)) }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: t("paths") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-              t("pathsHint"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("textarea", { rows: 3, value: draft.media.join("\n"), onChange: (e) => props.edit({ media: e.target.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) }) })
-            ] })
-          ] }),
-          spec?.scheduling !== "none" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-            t("schedule"),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", { type: "datetime-local", value: scheduleInput(draft.scheduleAt), onChange: (e) => props.edit({ scheduleAt: !e.target.value ? void 0 : draft.platform === "xiaohongshu" ? new Date(e.target.value).toISOString() : e.target.value.replace("T", " ") }) }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: t("scheduleHint") })
-          ] }),
-          draft.platform === "xiaohongshu" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
-              t("visibility"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("select", { value: draft.visibility ?? "", onChange: (e) => props.edit({ visibility: e.target.value || void 0 }), children: [
-                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "", children: t("public") }),
-                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "\u4EC5\u81EA\u5DF1\u53EF\u89C1", children: t("private") }),
-                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: "\u4EC5\u4E92\u5173\u597D\u53CB\u53EF\u89C1", children: t("mutual") })
-              ] })
-            ] }),
-            draft.kind === "note" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { className: "publish-switch", children: [
-              t("original"),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Switch, { checked: draft.isOriginal === true, label: t("original"), onChange: (value) => props.edit({ isOriginal: value }) })
-            ] })
-          ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { variant: "primary", onClick: props.prepare, disabled: disabled || !draft.title || !draft.media.length || !accounts.length, children: state.busy ? t("preflighting") : t("preflight") })
-        ] }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("aside", { className: "publish-section publish-preview", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", { children: t("preview") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-preview-meta", children: [
-            platformLabel(draft.platform, t),
-            " \xB7 ",
-            draft.account
-          ] }),
-          draft.media.length ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-thumbnails", children: draft.media.map((path) => {
-            const item = state.attachments.find((x) => x.path === path);
-            return item?.url ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { children: item.type.startsWith("video/") ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("video", { src: item.url, controls: true }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", { src: item.url, alt: item.name }) }, path) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-media-label", children: path.split(/[\\/]/).pop() }, path);
-          }) }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-empty-media", children: t("noMedia") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", { children: draft.title || t("titleField") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-body", children: draft.body || t("noBody") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: draft.tags?.map((x) => "#" + x).join(" ") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: draft.scheduleAt ?? t("immediate") })
-        ] })
-      ] }),
-      state.tab === "tasks" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "publish-section", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: t("submittedHint") }),
-        state.data?.entries.some((x) => x.status === "unknown") && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-notice", children: t("unknownHint") }),
-        state.loading ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { role: "status", children: t("loading") }) : !state.data?.entries.length ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-empty", children: t("empty") }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-table-scroll", children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("table", { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", { children: t("taskTitle") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", { children: t("account") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", { children: t("time") }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("th", { children: t("details") })
-          ] }) }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("tbody", { children: state.data.entries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("tr", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("td", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", { children: entry.request.title }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("small", { children: [
-                platformLabel(entry.request.platform, t),
-                " \xB7 ",
-                t(entry.request.kind)
-              ] })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("td", { children: entry.request.account }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("td", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-status publish-status-" + entry.status, children: statusLabel(entry.status, t) }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: new Date(entry.updatedAt).toLocaleString() })
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: t("details") }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: entry.detail ?? entry.note ?? t("prepared") }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: entry.note }),
-              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: entry.prepareId })
-            ] }) })
-          ] }, entry.prepareId)) })
-        ] }) })
-      ] }),
-      state.tab === "accounts" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "publish-section", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-section-heading", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", { children: t("accounts") }),
-          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { variant: "outline", onClick: props.check, disabled: state.busy, children: state.busy ? t("checking") : t("checkAccounts") })
-        ] }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: t("accountHelp") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "publish-account-status", children: configured.map((a) => {
-          const status = state.accounts?.find((s) => s.platform === a.platform && s.account === a.name);
-          return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("strong", { children: [
-              platformLabel(a.platform, t),
-              " \xB7 ",
-              a.name
-            ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: statusLabel(status?.status ?? "", t) }),
-            status?.detail && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: status.detail })
-          ] }, a.platform + "/" + a.name);
-        }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(SettingsContent, { state: settings, t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard, onlyAccounts: true })
-      ] }),
-      state.tab === "settings" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("section", { className: "publish-section", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(SettingsContent, { state: settings, t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("small", { children: t("ledger") }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { className: "publish-ledger", children: state.data?.ledgerPath })
-      ] })
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-calgrid", children: [
+      [1, 2, 3, 4, 5, 6, 7].map((number) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-wd", children: t("wd" + number) }, number)),
+      cells.map((cell, index) => {
+        if (cell.day === null) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-cell off" }, "off" + index);
+        const count = byDay.get(cell.key)?.length ?? 0;
+        const className = "publish-cell" + (cell.key === today ? " today" : "") + (cell.key === selected ? " picked" : "") + (interactive ? "" : " static");
+        return interactive ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { type: "button", className, "aria-pressed": cell.key === selected, onClick: () => onSelect(cell.key), children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CellBody, { day: cell.day, items: byDay.get(cell.key), colorFor }) }, cell.key) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { className, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)(CellBody, { day: cell.day, items: byDay.get(cell.key), colorFor }),
+          count > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-cnt", children: count })
+        ] }, cell.key);
+      })
     ] })
   ] });
 }
-function scheduleInput(value) {
-  if (!value) return "";
-  if (!value.includes("T")) return value.replace(" ", "T");
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 6e4);
-  return local.toISOString().slice(0, 16);
+function CellBody({ day, items, colorFor }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-cell-day", children: day }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-ev", children: (items ?? []).slice(0, 4).map((entry) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("i", { style: { background: colorFor(entry) } }, entry.prepareId)) })
+  ] });
+}
+function RecordRow({ entry, t }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-rec", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-rec-l1", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "publish-rec-t", children: entry.request.title }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "chip publish-status publish-status-" + entry.status, children: statusLabel(entry.status, t) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-rec-l2", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+        platformLabel(entry.request.platform, t),
+        " \xB7 ",
+        entry.request.account,
+        " \xB7 ",
+        t(entry.request.kind)
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+        new Date(recordDay(entry)).toLocaleDateString(),
+        " ",
+        new Date(entry.updatedAt).toLocaleTimeString()
+      ] })
+    ] }),
+    (entry.detail !== void 0 || entry.note !== void 0) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("details", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("summary", { children: t("details") }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { children: entry.detail }),
+      entry.note && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", { className: "publish-note-flag", children: entry.note }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("code", { children: entry.prepareId })
+    ] })
+  ] });
 }
 function SettingsContent({ state, t, edit, resetField, save, discard, onlyAccounts }) {
   const disabled = !state.writable || state.saving;
@@ -709,7 +791,7 @@ function SettingsContent({ state, t, edit, resetField, save, discard, onlyAccoun
     accounts.map((a, index) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-account-edit", children: [
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
         t("platform"),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("select", { value: a.platform, disabled, onChange: (e) => update(accounts.map((x, i) => i === index ? { ...x, id: x.id ?? x.platform + "/" + x.name, platform: e.target.value } : x)), children: ["xiaohongshu", "douyin", "kuaishou", "tencent", "dayu", "baijiahao", "alipay", "weibo", "hupu", "zhihu", "xueqiu", "youtube"].map((id) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: id, children: platformLabel(id, t) }, id)) })
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("select", { value: a.platform, disabled, onChange: (e) => update(accounts.map((x, i) => i === index ? { ...x, id: x.id ?? x.platform + "/" + x.name, platform: e.target.value } : x)), children: ["xiaohongshu", "douyin", "kuaishou", "tencent", "dayu", "baijiahao", "weibo", "zhihu", "xueqiu"].map((id) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("option", { value: id, children: platformLabel(id, t) }, id)) })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("label", { children: [
         t("account"),
@@ -750,17 +832,402 @@ function SettingsContent({ state, t, edit, resetField, save, discard, onlyAccoun
     numberFields.filter((key) => key !== "dailyLimit").map(field)
   ] }) });
 }
+
+// src/client/PlatformDetail.tsx
+var import_dsh_client_ui_primitives3 = require("@deepseek-ai/dsh-client-ui-primitives");
+var import_jsx_runtime2 = require("react/jsx-runtime");
+function PlatformDetail({ state, face, t, month, data }) {
+  const platform = state.view.view === "platform" ? state.view.platform : void 0;
+  if (!platform) return null;
+  const spec = data.platforms.find((p) => p.id === platform);
+  if (!spec) return null;
+  const accounts = data.configuredAccounts.filter((a) => a.platform === platform);
+  const records = data.entries.filter((e) => e.request.platform === platform && (!state.detailAccount || e.request.account === state.detailAccount));
+  const accountStates = state.accounts?.filter((s) => s.platform === platform) ?? [];
+  const loginChip = accounts.length === 0 ? null : accountStates.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "chip c-muted", children: t("notChecked") }) : accountStates.some((s) => s.status === "invalid") ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "chip c-unknown", children: t("invalid") }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "chip c-ok", children: t("valid") });
+  const platformEntries = data.entries.filter((e) => e.request.platform === platform);
+  const legend = [...new Set(platformEntries.map((e) => e.status))].map((status) => ({ color: statusColor(status), label: statusLabel(status, t) }));
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-detail", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-detail-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { variant: "outline", onClick: face.backHome, children: t("backToOverview") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(PlatformIcon, { id: platform, size: 34 }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-who", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("strong", { children: platformLabel(platform, t) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("select", { value: state.detailAccount ?? "", onChange: (e) => face.setDetailAccount(e.target.value), "aria-label": t("account"), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "", children: t("allAccounts") }),
+          accounts.map((a) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: a.name, children: a.name }, a.name))
+        ] }),
+        loginChip,
+        spec.acceptance === "pending" && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "chip c-warn", children: t("pendingAcceptance") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "publish-detail-acts", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: state.busy ? t("checking") : t("checkAccounts") }) })
+    ] }),
+    spec.blocked ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("section", { className: "publish-section", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "publish-na", children: spec.blocked }) }) : accounts.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "publish-section", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "publish-na", children: t("noAccounts") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { onClick: () => face.setTab("accounts"), children: t("addAccount") })
+    ] }) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(ComposeSection, { state, face, t, spec, data }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-detail-cols", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "publish-section publish-records", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("h2", { children: [
+          t("tasks"),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { className: "chip c-muted", children: t("platformOnly") })
+        ] }),
+        records.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "publish-empty", children: t("empty") }) : records.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(RecordRow, { entry, t }, entry.prepareId))
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "publish-side", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "publish-sidebox", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(Calendar, { entries: platformEntries, colorFor: (e) => statusColor(e.status), onSelect: () => {
+      }, interactive: false, month, title: t("monthRhythm"), legend, t }) }) })
+    ] })
+  ] });
+}
+function ComposeSection({ state, face, t, spec, data }) {
+  const draft = state.draft, review = state.review;
+  const accounts = data.configuredAccounts.filter((a) => a.platform === draft.platform);
+  const disabled = state.busy || !data.publishingEnabled;
+  if (review) return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { children: t("confirm") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { children: t("confirmHint") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("dl", { className: "publish-review", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("platform") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: platformLabel(review.request.platform, t) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("account") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.account }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("titleField") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.title }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("body") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "publish-body", children: review.request.body }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("media") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.media.map((path) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { children: path.split(/[\\/]/).pop() }, path)) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("schedule") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.scheduleAt ?? t("immediate") }),
+      review.request.visibility && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("visibility") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.visibility })
+      ] }),
+      review.request.isOriginal !== void 0 && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: t("original") }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: review.request.isOriginal ? t("original") : "\u2014" })
+      ] })
+    ] }),
+    review.plan.warnings.map((w) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { className: "publish-notice", children: w }, w)),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-actions", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { onClick: () => face.edit({}), disabled: state.busy, children: t("back") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { variant: "primary", disabled, onClick: face.submit, children: state.busy ? t("confirming") : t("confirm") })
+    ] })
+  ] });
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("h2", { children: t("newPost") }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "publish-kindtabs", role: "tablist", "aria-label": t("kind"), children: spec.kinds.map((kind) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { type: "button", role: "tab", "aria-selected": draft.kind === kind, onClick: () => face.edit({ kind, media: [], scheduleAt: void 0 }), children: t(kind) }, kind)) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-row", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+        t("account"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("select", { value: draft.account, onChange: (e) => face.edit({ account: e.target.value }), children: accounts.length ? accounts.map((a) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { children: a.name }, a.name)) : /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "", children: t("noAccounts") }) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+        t("titleField"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Input, { value: draft.title, onChange: (e) => face.edit({ title: e.target.value }), maxLength: spec.titleMaxChars })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+      t("body"),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { value: draft.body ?? "", rows: 9, onChange: (e) => face.edit({ body: e.target.value }) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+      t("tags"),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Input, { value: (draft.tags ?? []).join(", "), placeholder: t("tagsHint"), onChange: (e) => face.edit({ tags: e.target.value.split(/[,，]/).map((x) => x.trim()).filter(Boolean) }) })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "publish-upload", children: [
+        t("chooseFiles"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "file", multiple: draft.kind === "note", disabled: state.busy, accept: draft.kind === "note" ? "image/*" : draft.kind === "video" ? "video/*" : ".md,.txt,.html", onChange: (e) => {
+          face.upload(e.target.files);
+          e.target.value = "";
+        } })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("p", { children: t("uploadHint") })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("ul", { className: "publish-files", children: draft.media.map((path) => /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("li", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: state.attachments.find((x) => x.path === path)?.name ?? path }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { size: "sm", onClick: () => face.remove(path), "aria-label": t("remove") + " " + path.split(/[\\/]/).pop(), children: t("remove") })
+    ] }, path)) }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("details", { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("summary", { children: t("paths") }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+        t("pathsHint"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("textarea", { rows: 3, value: draft.media.join("\n"), onChange: (e) => face.edit({ media: e.target.value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean) }) })
+      ] })
+    ] }),
+    spec.scheduling !== "none" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+      t("schedule"),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("input", { type: "datetime-local", value: scheduleInput(draft.scheduleAt), onChange: (e) => face.edit({ scheduleAt: !e.target.value ? void 0 : draft.platform === "xiaohongshu" ? new Date(e.target.value).toISOString() : e.target.value.replace("T", " ") }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("small", { children: t("scheduleHint") })
+    ] }),
+    draft.platform === "xiaohongshu" && draft.kind === "note" && /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { className: "publish-row", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { children: [
+        t("visibility"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("select", { value: draft.visibility ?? "", onChange: (e) => face.edit({ visibility: e.target.value || void 0 }), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "", children: t("public") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "\u4EC5\u81EA\u5DF1\u53EF\u89C1", children: t("private") }),
+          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("option", { value: "\u4EC5\u4E92\u5173\u597D\u53CB\u53EF\u89C1", children: t("mutual") })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("label", { className: "publish-switch", children: [
+        t("original"),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Switch, { checked: draft.isOriginal === true, label: t("original"), onChange: (value) => face.edit({ isOriginal: value }) })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_dsh_client_ui_primitives3.Button, { variant: "primary", onClick: face.prepare, disabled: disabled || !draft.title || !draft.media.length || !draft.account, children: state.busy ? t("preflighting") : t("preflight") })
+  ] });
+}
+function scheduleInput(value) {
+  if (!value) return "";
+  if (!value.includes("T")) return value.replace(" ", "T");
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 6e4);
+  return local.toISOString().slice(0, 16);
+}
+
+// src/client/Page.tsx
+var import_jsx_runtime3 = require("react/jsx-runtime");
+function PublishIcon({ size }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.IconSendOutlineRegular, { size });
+}
+var TAB_KEYS = [{ key: "overview", label: "overview" }, { key: "accounts", label: "accounts" }, { key: "settings", label: "settings" }];
+function PublishPage(props) {
+  const { t } = props;
+  const state = props.usePublishState((s) => s);
+  const settingsState = props.usePublishSettings((s) => s);
+  const month = /* @__PURE__ */ new Date();
+  const inDetail = state.view.view === "platform";
+  const activeTab = inDetail ? "overview" : state.tab;
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-center", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("header", { className: "publish-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h1", { children: t("title") }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: t("description") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: props.refresh, disabled: state.busy, children: t("refresh") })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("nav", { className: "publish-tabs", role: "tablist", "aria-label": t("title"), children: TAB_KEYS.map(({ key, label }) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+      "button",
+      {
+        type: "button",
+        role: "tab",
+        id: "publish-tab-" + key,
+        "aria-controls": "publish-panel-" + key,
+        "aria-selected": activeTab === key,
+        onClick: () => {
+          if (key === "overview" && inDetail) props.backHome();
+          props.setTab(key);
+        },
+        children: t(label)
+      },
+      key
+    )) }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-content", role: "tabpanel", id: "publish-panel-" + activeTab, "aria-labelledby": "publish-tab-" + activeTab, children: [
+      state.error && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-notice", role: "alert", children: [
+        state.error,
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { onClick: props.refresh, children: t("retry") })
+      ] }),
+      state.data && !state.data.publishingEnabled && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "publish-notice", children: t("paused") }),
+      inDetail ? state.data && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformDetail, { state, face: props, t, month, data: state.data }) : activeTab === "overview" ? state.data && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Overview, { state, face: props, t, month, data: state.data }) : activeTab === "accounts" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AccountsSection, { state, settingsState, t, face: props }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsSection, { settingsState, t, face: props, ledgerPath: state.data?.ledgerPath })
+    ] })
+  ] });
+}
+function Overview({ state, face, t, month, data }) {
+  const order = (state.dragOrder ?? data.homeCards).filter((id) => data.platforms.some((p) => p.id === id));
+  const seen = /* @__PURE__ */ new Set();
+  const orderIds = order.filter((id) => seen.has(id) ? false : seen.add(id));
+  const todayKey = dayKey(month);
+  const monthPrefix = todayKey.slice(0, 7);
+  const attempted = (status) => ATTEMPTED.includes(status);
+  const todayCount = data.entries.filter((e) => recordDay(e) === todayKey && attempted(e.status)).length;
+  const monthCount = data.entries.filter((e) => recordDay(e).startsWith(monthPrefix) && attempted(e.status)).length;
+  const unknownCount = data.entries.filter((e) => e.status === "unknown").length;
+  const scheduledCount = data.entries.filter((e) => e.status === "scheduled").length;
+  const monthEntries = data.entries.filter((e) => recordDay(e).startsWith(monthPrefix));
+  const legend = [...new Set(monthEntries.map((e) => e.request.platform))].map((id) => ({ color: platformMeta(id).bg, label: platformLabel(id, t) }));
+  const dayEntries = state.selectedDate ? data.entries.filter((e) => recordDay(e) === state.selectedDate) : [];
+  const drag = (0, import_react.useRef)(null);
+  const onDown = (id) => (event) => {
+    drag.current = id;
+    event.preventDefault();
+    const onMove = (ev) => {
+      const current = drag.current;
+      if (!current) return;
+      const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest(".publish-pcard[data-platform]");
+      const targetId = target?.getAttribute("data-platform");
+      if (targetId && targetId !== current) face.reorder(current, targetId);
+    };
+    const finish = (commit) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      const current = drag.current;
+      drag.current = null;
+      if (commit && current) face.commitOrder();
+      if (!commit && current) face.cancelDrag();
+    };
+    const onUp = () => finish(true);
+    const onCancel = () => finish(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-statstrip", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: todayCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("todayPublished") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: monthCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("monthPublished") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: unknownCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("pendingCount") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-stat", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: scheduledCount }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("scheduledCount") })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-cards", children: [
+      orderIds.map((id) => {
+        const spec = data.platforms.find((p) => p.id === id);
+        const accounts = data.configuredAccounts.filter((a) => a.platform === id);
+        const checks = state.accounts?.filter((s) => s.platform === id) ?? [];
+        const invalid = checks.some((s) => s.status === "invalid");
+        const platformEntries = data.entries.filter((e) => e.request.platform === id);
+        const platformMonth = platformEntries.filter((e) => recordDay(e).startsWith(monthPrefix) && attempted(e.status));
+        const platformUnknown = platformEntries.filter((e) => e.status === "unknown").length;
+        const platformScheduled = platformEntries.filter((e) => e.status === "scheduled").length;
+        const badge = spec.blocked ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("blocked") }) : spec.acceptance === "pending" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-warn", children: t("pendingAcceptance") }) : !accounts.length ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("notConfigured") }) : invalid ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-unknown", children: t("invalid") }) : checks.length ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-ok", children: t("valid") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip c-muted", children: t("notChecked") });
+        return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard", "data-platform": id, children: [
+          !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "publish-drag", "aria-hidden": true, onPointerDown: onDown(id), children: "\u283F" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard-head", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id, size: 34 }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pname", children: platformLabel(id, t) }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pmeta", children: platformSummary(spec) })
+            ] }),
+            badge
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-accs", children: accounts.map((a) => {
+            const st = checks.find((s) => s.account === a.name);
+            return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "publish-acc", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("i", { className: "dot", style: { background: st?.status === "invalid" ? "#d97917" : "#0d8a55" } }),
+              a.name
+            ] }, a.name);
+          }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-nums", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformMonth.length }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("monthPublished") })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformUnknown }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("pendingCount") })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("b", { children: platformScheduled }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: t("scheduledCount") })
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-minilist", children: platformEntries.slice(0, 3).map((entry) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-minilist-row", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "t", children: entry.request.title }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "chip publish-status publish-status-" + entry.status, children: statusLabel(entry.status, t) }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "d", children: recordDay(entry).slice(5) })
+          ] }, entry.prepareId)) }),
+          spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-na", children: spec.blocked }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-actions", children: [
+            !spec.blocked && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "primary", onClick: () => face.openPlatform(id), children: t("newPost") }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.openPlatform(id), children: t("viewPlatform") }),
+            invalid && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: t("checkAccounts") }),
+            !accounts.length && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: () => face.setTab("accounts"), children: t("addAccount") })
+          ] })
+        ] }, id);
+      }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard publish-more-card", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-pcard-head", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "publish-pico", style: { background: "#e3e5e8", color: "#646a73", fontSize: 16 }, children: "\uFF0B" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pname", children: t("morePlatforms") }),
+            /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-pmeta", children: t("morePlatformsHint") })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-actions", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.toggleMore, children: t("openMorePanel") }) })
+      ] })
+    ] }),
+    state.moreOpen && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-morepanel", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h3", { children: t("morePlatforms") }),
+      data.platforms.map((spec) => {
+        const inHome = data.homeCards.includes(spec.id);
+        return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-more-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PlatformIcon, { id: spec.id, size: 24 }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "nm", children: platformLabel(spec.id, t) }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "st", children: [
+            platformSummary(spec),
+            spec.acceptance === "pending" ? " \xB7 " + t("pendingAcceptance") : ""
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { size: "sm", variant: "outline", onClick: () => inHome ? face.removeMore(spec.id) : face.addMore(spec.id), children: inHome ? t("removeFromHome") : t("addToHome") })
+        ] }, spec.id);
+      })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Calendar, { entries: monthEntries, colorFor: (e) => platformMeta(e.request.platform).bg, selected: state.selectedDate, onSelect: face.selectDate, month, title: t("globalCalendar"), legend, t }),
+    state.selectedDate && /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("h2", { children: [
+        t("dayRecords"),
+        " \xB7 ",
+        state.selectedDate
+      ] }),
+      dayEntries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-empty", children: t("empty") }) : dayEntries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(RecordRow, { entry, t }, entry.prepareId))
+    ] })
+  ] });
+}
+function AccountsSection({ state, settingsState, t, face }) {
+  const data = state.data;
+  const configured = data?.configuredAccounts ?? [];
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-section-heading", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("h2", { children: t("accounts") }),
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: face.check, disabled: state.busy, children: state.busy ? t("checking") : t("checkAccounts") })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { children: t("accountHelp") }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "publish-account-status", children: configured.map((a) => {
+      const status = state.accounts?.find((s) => s.platform === a.platform && s.account === a.name);
+      return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("strong", { children: [
+          platformLabel(a.platform, t),
+          " \xB7 ",
+          a.name
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { children: statusLabel(status?.status ?? "", t) }),
+        status?.detail && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: status.detail })
+      ] }, a.platform + "/" + a.name);
+    }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard, onlyAccounts: true })
+  ] });
+}
+function SettingsSection({ settingsState, t, face, ledgerPath }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("section", { className: "publish-section", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state: settingsState, t, edit: face.editSettings, resetField: face.resetField, save: face.save, discard: face.discard }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("small", { children: t("ledger") }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("code", { className: "publish-ledger", children: ledgerPath })
+  ] });
+}
 function PublishSettings(props) {
   const state = props.usePublishSettings((s) => s);
   if (props.view === "summary") return props.t("summary");
-  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "publish-center publish-settings-card", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(import_dsh_client_ui_primitives2.Button, { variant: "outline", onClick: props.openCenter, children: props.t("title") }),
-    /* @__PURE__ */ (0, import_jsx_runtime.jsx)(SettingsContent, { state, t: props.t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard })
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "publish-center publish-settings-card", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_dsh_client_ui_primitives4.Button, { variant: "outline", onClick: props.openCenter, children: props.t("title") }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SettingsContent, { state, t: props.t, edit: props.editSettings, resetField: props.resetField, save: props.save, discard: props.discard })
   ] });
 }
 
 // src/client/client.css
-var client_default = ".publish-center{display:flex;flex-direction:column;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.6}\n.publish-center h1,.publish-center h2,.publish-center h3,.publish-center p{margin:0}\n.publish-center h1{font-size:22px;font-weight:500;line-height:30px}\n.publish-center h2{font-size:16px;font-weight:500}.publish-center h3,.publish-center strong{font-weight:500}\n.publish-center p,.publish-center small{color:var(--dsw-alias-label-secondary)}\n.publish-center small{display:block;font-size:12px}\n.publish-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:28px 32px 20px;flex-shrink:0}\n[data-platform=darwin] .publish-header{padding-top:calc(28px + var(--dsh-frame-top-clearance,0px))}\n.publish-tabs{display:flex;gap:20px;padding:0 32px;border-bottom:.5px solid var(--dsw-alias-border-l3);flex-shrink:0}\n.publish-tabs button{background:transparent;border:0;border-bottom:2px solid transparent;padding:12px 0;cursor:pointer;font:inherit;color:var(--dsw-alias-label-secondary);white-space:nowrap}\n.publish-tabs button[aria-selected=true]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-label-primary)}\n.publish-content{padding:24px 32px;display:flex;flex-direction:column;gap:16px;max-width:1400px;width:100%;box-sizing:border-box;overflow:auto;flex:1;min-height:0}\n.publish-editor{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}\n.publish-section{display:flex;flex-direction:column;gap:18px;min-width:0;padding:24px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,12px)}\n.publish-section-heading,.publish-actions{display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-center label{display:flex;flex-direction:column;gap:8px;font-size:13px;min-width:0}\n.publish-center textarea,.publish-center select,.publish-center input[type=datetime-local]{box-sizing:border-box;width:100%;min-width:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);font:inherit;line-height:1.6;color:inherit;background:var(--dsw-alias-bg-base)}\n.publish-center textarea{resize:vertical}.publish-center button:focus-visible,.publish-center input:focus-visible,.publish-center select:focus-visible,.publish-center textarea:focus-visible,.publish-center summary:focus-visible{outline:2px solid var(--dsw-alias-button-primary-bg,var(--dsw-alias-label-primary));outline-offset:3px}\n.publish-row{display:flex;gap:12px;flex-wrap:wrap}.publish-row>label{flex:1;min-width:130px}\n.publish-switch{flex-direction:row!important;align-items:center;justify-content:space-between;gap:20px;padding:10px 0}\n.publish-upload{padding:20px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);cursor:pointer}\n.publish-upload input{font-size:12px}.publish-files{padding:0;margin:0;list-style:none}.publish-files li{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l3);padding:6px 0}.publish-files span{overflow-wrap:anywhere;min-width:0}\n.publish-preview{position:sticky;top:0;gap:16px}.publish-preview-meta{font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-body{white-space:pre-wrap;overflow-wrap:anywhere}.publish-thumbnails{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.publish-thumbnails>div:first-child{grid-column:1/-1}.publish-thumbnails img,.publish-thumbnails video{display:block;width:100%;max-height:320px;object-fit:contain;border-radius:var(--dsw-radius-sm,8px)}.publish-empty-media,.publish-media-label{padding:40px 14px;text-align:center;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.publish-notice{padding:12px 16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-review{display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px;font-size:13px;margin:0}.publish-review dt{color:var(--dsw-alias-label-secondary)}.publish-review dd{margin:0;overflow-wrap:anywhere}\n.publish-table-scroll{overflow:auto}.publish-center table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}.publish-center th{font-weight:500;color:var(--dsw-alias-label-secondary)}.publish-center td,.publish-center th{padding:14px 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);vertical-align:top}.publish-center td{min-width:100px}.publish-center details p{max-width:360px;overflow-wrap:anywhere}.publish-center summary{cursor:pointer}.publish-status{display:inline-flex;padding:2px 8px;border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);white-space:nowrap}.publish-status-unknown,.publish-status-submitted{border:.5px solid var(--dsw-alias-border-l3)}\n.publish-empty{padding:64px 12px;text-align:center;color:var(--dsw-alias-label-secondary)}\n.publish-account-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.publish-account-status>div{display:flex;flex-direction:column;gap:8px;padding:16px;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px)}\n.publish-account-edit{display:flex;gap:12px;align-items:end;margin-bottom:14px;flex-wrap:wrap}.publish-account-edit label{flex:1;min-width:140px}.publish-settings-card{padding:20px;box-sizing:border-box;gap:20px}.publish-ledger{overflow-wrap:anywhere;font-size:12px}\n@media(max-width:1000px){.publish-editor{grid-template-columns:minmax(0,1fr)}.publish-preview{position:static}.publish-thumbnails{grid-template-columns:repeat(3,minmax(0,1fr))}.publish-thumbnails>div:first-child{grid-column:auto}}\n@media(max-width:520px){.publish-header{padding:20px 16px 12px}.publish-tabs{padding:0 16px;gap:16px;overflow:auto}.publish-content{padding:16px}.publish-section{padding:16px}.publish-row{flex-direction:column}.publish-header h1{font-size:20px}}\n@media(prefers-reduced-motion:reduce){.publish-center *{scroll-behavior:auto!important;transition:none!important}}\n";
+var client_default = ".publish-center{display:flex;flex-direction:column;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.6}\n.publish-center h1,.publish-center h2,.publish-center h3,.publish-center p{margin:0}\n.publish-center h1{font-size:22px;font-weight:500;line-height:30px}\n.publish-center h2{font-size:16px;font-weight:500}.publish-center h3,.publish-center strong{font-weight:500}\n.publish-center p,.publish-center small{color:var(--dsw-alias-label-secondary)}\n.publish-center small{display:block;font-size:12px}\n.publish-header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:28px 32px 20px;flex-shrink:0}\n[data-platform=darwin] .publish-header{padding-top:calc(28px + var(--dsh-frame-top-clearance,0px))}\n.publish-tabs{display:flex;gap:20px;padding:0 32px;border-bottom:.5px solid var(--dsw-alias-border-l3);flex-shrink:0}\n.publish-tabs button{background:transparent;border:0;border-bottom:2px solid transparent;padding:12px 0;cursor:pointer;font:inherit;color:var(--dsw-alias-label-secondary);white-space:nowrap}\n.publish-tabs button[aria-selected=true]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-label-primary)}\n.publish-content{padding:24px 32px;display:flex;flex-direction:column;gap:16px;max-width:1400px;width:100%;box-sizing:border-box;overflow:auto;flex:1;min-height:0}\n.publish-editor{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px;align-items:start}\n.publish-section{display:flex;flex-direction:column;gap:18px;min-width:0;padding:24px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,12px)}\n.publish-section-heading,.publish-actions{display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-center label{display:flex;flex-direction:column;gap:8px;font-size:13px;min-width:0}\n.publish-center textarea,.publish-center select,.publish-center input[type=datetime-local]{box-sizing:border-box;width:100%;min-width:0;padding:10px 12px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);font:inherit;line-height:1.6;color:inherit;background:var(--dsw-alias-bg-base)}\n.publish-center textarea{resize:vertical}.publish-center button:focus-visible,.publish-center input:focus-visible,.publish-center select:focus-visible,.publish-center textarea:focus-visible,.publish-center summary:focus-visible{outline:2px solid var(--dsw-alias-button-primary-bg,var(--dsw-alias-label-primary));outline-offset:3px}\n.publish-row{display:flex;gap:12px;flex-wrap:wrap}.publish-row>label{flex:1;min-width:130px}\n.publish-switch{flex-direction:row!important;align-items:center;justify-content:space-between;gap:20px;padding:10px 0}\n.publish-upload{padding:20px;border:1px dashed var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);cursor:pointer}\n.publish-upload input{font-size:12px}.publish-files{padding:0;margin:0;list-style:none}.publish-files li{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l3);padding:6px 0}.publish-files span{overflow-wrap:anywhere;min-width:0}\n.publish-preview{position:sticky;top:0;gap:16px}.publish-preview-meta{font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-body{white-space:pre-wrap;overflow-wrap:anywhere}.publish-thumbnails{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.publish-thumbnails>div:first-child{grid-column:1/-1}.publish-thumbnails img,.publish-thumbnails video{display:block;width:100%;max-height:320px;object-fit:contain;border-radius:var(--dsw-radius-sm,8px)}.publish-empty-media,.publish-media-label{padding:40px 14px;text-align:center;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px);color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}\n.publish-notice{padding:12px 16px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);display:flex;gap:12px;align-items:center;justify-content:space-between}\n.publish-review{display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px;font-size:13px;margin:0}.publish-review dt{color:var(--dsw-alias-label-secondary)}.publish-review dd{margin:0;overflow-wrap:anywhere}\n.publish-table-scroll{overflow:auto}.publish-center table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}.publish-center th{font-weight:500;color:var(--dsw-alias-label-secondary)}.publish-center td,.publish-center th{padding:14px 12px;border-bottom:.5px solid var(--dsw-alias-border-l3);vertical-align:top}.publish-center td{min-width:100px}.publish-center details p{max-width:360px;overflow-wrap:anywhere}.publish-center summary{cursor:pointer}.publish-status{display:inline-flex;padding:2px 8px;border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-base);white-space:nowrap}.publish-status-unknown,.publish-status-submitted{border:.5px solid var(--dsw-alias-border-l3)}\n.publish-empty{padding:64px 12px;text-align:center;color:var(--dsw-alias-label-secondary)}\n.publish-account-status{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.publish-account-status>div{display:flex;flex-direction:column;gap:8px;padding:16px;background:var(--dsw-alias-bg-base);border-radius:var(--dsw-radius-sm,8px)}\n.publish-account-edit{display:flex;gap:12px;align-items:end;margin-bottom:14px;flex-wrap:wrap}.publish-account-edit label{flex:1;min-width:140px}.publish-settings-card{padding:20px;box-sizing:border-box;gap:20px}.publish-ledger{overflow-wrap:anywhere;font-size:12px}\n@media(max-width:1000px){.publish-editor{grid-template-columns:minmax(0,1fr)}.publish-preview{position:static}.publish-thumbnails{grid-template-columns:repeat(3,minmax(0,1fr))}.publish-thumbnails>div:first-child{grid-column:auto}}\n@media(max-width:520px){.publish-header{padding:20px 16px 12px}.publish-tabs{padding:0 16px;gap:16px;overflow:auto}.publish-content{padding:16px}.publish-section{padding:16px}.publish-row{flex-direction:column}.publish-header h1{font-size:20px}}\n@media(prefers-reduced-motion:reduce){.publish-center *{scroll-behavior:auto!important;transition:none!important}}\n/* ===== v0.3 \u5E73\u53F0\u4F18\u5148\uFF1A\u603B\u89C8\u5361\u7247\u3001\u66F4\u591A\u5E73\u53F0\u3001\u65E5\u5386\u3001\u5E73\u53F0\u8BE6\u60C5 ===== */\n.publish-center .chip{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;font-size:12px;white-space:nowrap}\n.publish-center .c-ok{background:#e8f7ef;color:#0d8a55}.publish-center .c-sub{background:#e8efff;color:#2a5bd7}\n.publish-center .c-unknown{background:#fdf2e2;color:#b25e09}.publish-center .c-warn{background:#fdf2e2;color:#b25e09}\n.publish-center .c-sched{background:#f3ecfb;color:#7a3db8}.publish-center .c-fail{background:#feecea;color:#d92d20}\n.publish-center .c-muted{background:#f2f3f5;color:#646a73}\n.publish-statstrip{display:flex;gap:12px;margin-bottom:16px}\n.publish-stat{flex:1;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:10px;padding:12px 16px}\n.publish-stat b{display:block;font-size:22px;font-weight:600}.publish-stat span{font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}\n.publish-pcard{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;position:relative}\n.publish-pcard-head{display:flex;align-items:center;gap:10px}\n.publish-pico{width:34px;height:34px;border-radius:9px;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:none}\n.publish-pname{font-size:15px;font-weight:600}.publish-pmeta{font-size:11px;color:var(--dsw-alias-label-secondary)}\n.publish-pcard-head .chip{margin-left:auto}\n.publish-drag{position:absolute;top:10px;right:12px;color:var(--dsw-alias-label-secondary);opacity:.5;letter-spacing:2px;cursor:grab;touch-action:none}\n.publish-drag:active{cursor:grabbing;opacity:1}\n.publish-accs{display:flex;gap:8px;flex-wrap:wrap}\n.publish-acc{font-size:11px;padding:3px 10px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-base);display:inline-flex;align-items:center}\n.publish-acc .dot{margin-right:5px}\n.publish-nums{display:flex;gap:22px;font-size:12px;color:var(--dsw-alias-label-secondary)}\n.publish-nums b{display:block;font-size:16px;color:var(--dsw-alias-label-primary);font-weight:600}\n.publish-minilist{display:flex;flex-direction:column;gap:6px}\n.publish-minilist-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:6px 10px;background:var(--dsw-alias-bg-base);border-radius:8px}\n.publish-minilist-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.publish-minilist-row .d{color:var(--dsw-alias-label-secondary);font-size:11px;flex:none}\n.publish-na{font-size:11.5px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);border-radius:8px;padding:8px 10px;border:.5px dashed var(--dsw-alias-border-l3)}\n.publish-actions{display:flex;gap:10px;flex-wrap:wrap}\n.publish-more-card{border-style:dashed}\n.publish-morepanel{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\n.publish-morepanel h3{font-size:13.5px;font-weight:600;margin-bottom:10px}\n.publish-more-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:6px;font-size:12.5px}\n.publish-more-row .nm{width:76px;font-weight:500}\n.publish-more-row .st{flex:1;color:var(--dsw-alias-label-secondary);font-size:11.5px}\n.publish-more-row .publish-pico{width:24px;height:24px;border-radius:6px;font-size:11px}\n.publish-cal{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 16px;margin-top:14px}\n.publish-cal-head{display:flex;align-items:center;gap:12px;font-size:13px;font-weight:600;margin-bottom:10px;flex-wrap:wrap}\n.publish-cal-legend{margin-left:auto;display:flex;gap:12px;font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:400;flex-wrap:wrap}\n.publish-cal-legend .dot{margin-right:5px}\n.publish-calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}\n.publish-wd{text-align:center;font-size:11px;color:var(--dsw-alias-label-secondary);padding:2px 0}\n.publish-cell{min-height:42px;background:var(--dsw-alias-bg-base);border:.5px solid transparent;border-radius:7px;padding:4px 6px;font-size:11px;position:relative;text-align:left;font:inherit;color:inherit;cursor:pointer}\n.publish-cell:hover{border-color:var(--dsw-alias-border-l3)}\n.publish-cell.static{cursor:default}\n.publish-cell.off{background:transparent}\n.publish-cell.today{border-color:#3370ff}\n.publish-cell.picked{background:#e8efff}\n.publish-cell-day{color:var(--dsw-alias-label-secondary)}\n.publish-cell.today .publish-cell-day{color:#3370ff;font-weight:600}\n.publish-ev{display:flex;gap:3px;margin-top:3px;min-height:7px}\n.publish-ev i{width:7px;height:7px;border-radius:2px;display:block}\n.publish-cnt{position:absolute;right:5px;bottom:3px;font-size:10px;color:var(--dsw-alias-label-secondary)}\n.publish-detail-head{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:12px;padding:14px 18px;display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}\n.publish-who{display:flex;align-items:center;gap:10px;font-size:15px}\n.publish-who select{width:auto;padding:6px 10px}\n.publish-detail-acts{margin-left:auto;display:flex;gap:10px}\n.publish-detail-cols{display:flex;gap:14px;align-items:flex-start;margin-top:14px}\n.publish-records{flex:1;min-width:0}\n.publish-side{width:380px;flex:none}\n.publish-side .publish-cal{margin-top:0}\n.publish-rec{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px}\n.publish-rec-l1{display:flex;align-items:center;gap:8px}\n.publish-rec-t{flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\n.publish-rec-l2{font-size:11px;color:var(--dsw-alias-label-secondary);display:flex;gap:10px;flex-wrap:wrap}\n.publish-rec details{font-size:11.5px}.publish-rec details p{margin:4px 0;overflow-wrap:anywhere}\n.publish-note-flag{color:#b25e09;background:#fdf2e2;border-radius:6px;padding:1px 7px;display:inline-block}\n.publish-kindtabs{display:flex;gap:8px}\n.publish-kindtabs button{background:var(--dsw-alias-bg-base);border:.5px solid var(--dsw-alias-border-l3);border-radius:999px;padding:6px 16px;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary);cursor:pointer}\n.publish-kindtabs button[aria-selected=true]{background:#3370ff;border-color:#3370ff;color:#fff}\n.publish-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}\n@media(max-width:1000px){.publish-detail-cols{flex-direction:column}.publish-side{width:auto}}\n@media(max-width:520px){.publish-cards{grid-template-columns:1fr}.publish-statstrip{flex-wrap:wrap}.publish-stat{min-width:calc(50% - 6px)}}\n";
 
 // src/client/index.ts
 var panel = "publish-center";
