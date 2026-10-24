@@ -5,7 +5,7 @@ var __export = (target, all) => {
 };
 
 // src/index.ts
-import { join as join2 } from "node:path";
+import { join as join2, dirname as dirname4 } from "node:path";
 import { homedir } from "node:os";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -14585,6 +14585,8 @@ var requestSchema = external_exports.object({
   isOriginal: external_exports.boolean().optional()
 });
 var submitSchema = external_exports.object({ prepareId: external_exports.string(), token: external_exports.string(), confirmed: external_exports.literal(true) });
+var prepareIdSchema = external_exports.object({ prepareId: external_exports.string().min(1) });
+var bindSchema = external_exports.object({ prepareId: external_exports.string().min(1), noteId: external_exports.string().min(1) });
 
 // src/ledger.ts
 import { existsSync } from "node:fs";
@@ -14826,6 +14828,65 @@ var XhsAdapter = class {
       return { loggedIn: false, detail: `\u670D\u52A1\u4E0D\u53EF\u8FBE\uFF1A${error51.message}` };
     }
   }
+  /** 当前登录用户自己的笔记列表（/api/v1/user/me 的 data.feeds）。 */
+  async userNotes() {
+    try {
+      const result = await this.call("/api/v1/user/me");
+      const record2 = typeof result.json === "object" && result.json !== null ? result.json : {};
+      const data = typeof record2.data === "object" && record2.data !== null ? record2.data : {};
+      const feeds = Array.isArray(data.feeds) ? data.feeds : [];
+      const notes = [];
+      for (const feed of feeds) {
+        if (typeof feed !== "object" || feed === null) continue;
+        const row = feed;
+        const noteId = typeof row.id === "string" ? row.id : void 0;
+        const xsecToken = typeof row.xsecToken === "string" ? row.xsecToken : void 0;
+        const card = typeof row.noteCard === "object" && row.noteCard !== null ? row.noteCard : {};
+        const title = typeof card.displayTitle === "string" ? card.displayTitle : "";
+        const type = typeof card.type === "string" ? card.type : "";
+        if (noteId && xsecToken) notes.push({ noteId, xsecToken, title, type });
+      }
+      if (result.status >= 300 || record2.success !== true) {
+        return { ok: false, notes: [], detail: extractMessage(result.json) ?? result.text.slice(0, 200) };
+      }
+      return { ok: true, notes, detail: extractMessage(result.json) ?? "ok" };
+    } catch (error51) {
+      return { ok: false, notes: [], detail: `\u670D\u52A1\u4E0D\u53EF\u8FBE\uFF1A${error51.message}` };
+    }
+  }
+  /** 单篇笔记的互动数据（/api/v1/feeds/detail 的 note.interactInfo）。 */
+  async noteDetail(noteId, xsecToken) {
+    try {
+      const result = await this.call("/api/v1/feeds/detail", {
+        method: "POST",
+        body: JSON.stringify({ feed_id: noteId, xsec_token: xsecToken })
+      });
+      const record2 = typeof result.json === "object" && result.json !== null ? result.json : {};
+      const data = typeof record2.data === "object" && record2.data !== null ? record2.data : {};
+      const note = typeof data.note === "object" && data.note !== null ? data.note : {};
+      const interact = typeof note.interactInfo === "object" && note.interactInfo !== null ? note.interactInfo : {};
+      if (result.status >= 300 || record2.success !== true) {
+        return { ok: false, detail: extractMessage(result.json) ?? result.text.slice(0, 200) };
+      }
+      const stats = {
+        ...parseCount(interact.likedCount) === void 0 ? {} : { likes: parseCount(interact.likedCount) },
+        ...parseCount(interact.collectedCount) === void 0 ? {} : { collects: parseCount(interact.collectedCount) },
+        ...parseCount(interact.commentCount) === void 0 ? {} : { comments: parseCount(interact.commentCount) },
+        ...parseCount(interact.sharedCount) === void 0 ? {} : { shares: parseCount(interact.sharedCount) }
+      };
+      const time3 = typeof note.time === "number" ? new Date(note.time).toISOString() : void 0;
+      const title = typeof note.title === "string" ? note.title : void 0;
+      return {
+        ok: true,
+        stats,
+        ...title === void 0 ? {} : { title },
+        ...time3 === void 0 ? {} : { postedAt: time3 },
+        detail: extractMessage(result.json) ?? "ok"
+      };
+    } catch (error51) {
+      return { ok: false, detail: `\u670D\u52A1\u4E0D\u53EF\u8FBE\uFF1A${error51.message}` };
+    }
+  }
   async publish(input, signal) {
     const path = input.kind === "video" ? "/api/v1/publish_video" : "/api/v1/publish";
     const payload = {
@@ -14851,6 +14912,15 @@ function readSuccess(json2) {
   if (typeof json2 !== "object" || json2 === null) return false;
   const record2 = json2;
   return record2.success === true;
+}
+function parseCount(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return void 0;
+  const text = value.trim().replace(/,/g, "");
+  if (/^\d+(\.\d+)?$/.test(text)) return Number(text);
+  const wan = text.match(/^(\d+(?:\.\d+)?)万$/);
+  if (wan) return Math.round(Number(wan[1]) * 1e4);
+  return void 0;
 }
 function extractMessage(json2) {
   if (typeof json2 !== "object" || json2 === null) return void 0;
@@ -15018,16 +15088,93 @@ var SAU = {
   resultJsonPlatforms: ["facebook", "facebook-page", "instagram", "dayu", "zhihu"]
 };
 
+// src/metrics.ts
+import { mkdir as mkdir2, readFile as readFile2, rename as rename2, writeFile as writeFile2 } from "node:fs/promises";
+import { dirname as dirname2 } from "node:path";
+
+// src/metrics-types.ts
+function matchByTitle(notes, title) {
+  const hits = notes.filter((note) => note.title.trim() === title.trim());
+  return hits.length === 1 ? hits[0] : void 0;
+}
+
+// src/metrics.ts
+var SNAPSHOT_LIMIT = 30;
+var MetricsStore = class {
+  constructor(file2) {
+    this.file = file2;
+  }
+  file;
+  data;
+  queue = Promise.resolve();
+  async load() {
+    if (this.data) return this.data;
+    try {
+      const raw = await readFile2(this.file, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed.version !== 1 || typeof parsed.notes !== "object" || parsed.notes === null) throw new Error("\u6570\u636E\u56DE\u91C7\u5B58\u50A8\u683C\u5F0F\u4E0D\u8BA4");
+      this.data = parsed;
+    } catch (error51) {
+      if (error51.code === "ENOENT") {
+        this.data = { version: 1, notes: {} };
+      } else {
+        throw error51;
+      }
+    }
+    return this.data;
+  }
+  async persist() {
+    const data = await this.load();
+    const text = `${JSON.stringify(data, null, 2)}
+`;
+    this.queue = this.queue.then(async () => {
+      await mkdir2(dirname2(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      await writeFile2(tmp, text, "utf8");
+      await rename2(tmp, this.file);
+    });
+    await this.queue;
+  }
+  async get(key) {
+    return (await this.load()).notes[key];
+  }
+  async all() {
+    return { ...(await this.load()).notes };
+  }
+  /** 绑定或改绑（同 key 幂等覆盖）。 */
+  async bind(key, ref) {
+    const data = await this.load();
+    const previous = data.notes[key];
+    data.notes[key] = { noteRef: ref, snapshots: previous?.snapshots ?? [] };
+    await this.persist();
+  }
+  async unbind(key) {
+    const data = await this.load();
+    if (data.notes[key] === void 0) return;
+    delete data.notes[key];
+    await this.persist();
+  }
+  async pushSnapshot(key, snapshot) {
+    const data = await this.load();
+    const metrics = data.notes[key];
+    if (!metrics) return;
+    metrics.snapshots = [...metrics.snapshots, { ...snapshot, at: (/* @__PURE__ */ new Date()).toISOString() }].slice(-SNAPSHOT_LIMIT);
+    await this.persist();
+  }
+};
+
 // src/runtime.ts
 var PublishRuntime = class {
-  constructor(ctx, ledger, config2) {
+  constructor(ctx, ledger, config2, metrics) {
     this.ctx = ctx;
     this.ledger = ledger;
     this.config = config2;
+    this.metrics = metrics;
   }
   ctx;
   ledger;
   config;
+  metrics;
   claims = /* @__PURE__ */ new Set();
   running = /* @__PURE__ */ new Set();
   accountQueues = /* @__PURE__ */ new Map();
@@ -15095,7 +15242,7 @@ var PublishRuntime = class {
         abort.signal.throwIfAborted();
         const finalHashes = await Promise.all(entry.request.media.map(async (file2) => (await hashFile(file2)).hash));
         if (digestRequest(entry.request, finalHashes) !== entry.digest) throw new Error("\u6392\u961F\u671F\u95F4\u5A92\u4F53\u5DF2\u53D8\u5316\uFF0C\u672A\u63D0\u4EA4");
-        return executePublish(entry, spec, xhs, sau, config2, this.ledger, AbortSignal.any([this.lifetime.signal, abort.signal]));
+        return executePublish(entry, spec, xhs, sau, config2, this.ledger, AbortSignal.any([this.lifetime.signal, abort.signal]), this.metrics);
       };
       let task;
       try {
@@ -15217,7 +15364,7 @@ async function validate(request, config2, ledger) {
   }
   return { warnings, deviations };
 }
-async function executePublish(entry, spec, xhs, sau, config2, ledger, signal) {
+async function executePublish(entry, spec, xhs, sau, config2, ledger, signal, metrics) {
   try {
     if (spec.adapter === "xhs") {
       const result2 = await xhs.publish({
@@ -15232,6 +15379,10 @@ async function executePublish(entry, spec, xhs, sau, config2, ledger, signal) {
       }, signal);
       const status = result2.ok ? entry.request.scheduleAt === void 0 ? "submitted" : "scheduled" : "unknown";
       await ledger.update(entry.key, { status, detail: result2.detail });
+      if (result2.ok && entry.request.scheduleAt === void 0 && metrics) {
+        void autoMatch(entry, xhs, metrics).catch(() => {
+        });
+      }
       return { ok: result2.ok, status, detail: result2.detail };
     }
     if (!spec.sauName) throw new Error("\u8BE5\u5E73\u53F0\u6CA1\u6709 sau \u5B50\u547D\u4EE4");
@@ -15258,12 +15409,25 @@ async function executePublish(entry, spec, xhs, sau, config2, ledger, signal) {
     return { ok: false, status: "unknown", detail };
   }
 }
+async function autoMatch(entry, xhs, metrics) {
+  const listed = await xhs.userNotes();
+  if (!listed.ok) return;
+  const hit = matchByTitle(listed.notes, entry.request.title);
+  if (!hit) return;
+  await metrics.bind(entry.key, {
+    noteId: hit.noteId,
+    xsecToken: hit.xsecToken,
+    title: hit.title,
+    boundAt: (/* @__PURE__ */ new Date()).toISOString(),
+    method: "auto"
+  });
+}
 
 // src/api.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir2, open, rm } from "node:fs/promises";
-import { dirname as dirname2, join, basename } from "node:path";
-function mountPublishApi(ctx, runtime, config2, ledgerPath) {
+import { mkdir as mkdir3, open, rm } from "node:fs/promises";
+import { dirname as dirname3, join, basename } from "node:path";
+function mountPublishApi(ctx, runtime, config2, ledgerPath, metrics) {
   const tickets = /* @__PURE__ */ new Map();
   const lifetime = new AbortController();
   const uploads = /* @__PURE__ */ new Set();
@@ -15293,6 +15457,59 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath) {
       if (!ticket || ticket.token !== input.token || ticket.expires < Date.now() || ticket.digest !== entry?.digest) throw new Error("\u786E\u8BA4\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u9884\u68C0");
       tickets.delete(input.prepareId);
       return runtime.submit(input.prepareId, { signal, source: "page", approve: async () => true });
+    },
+    "metrics.list": async () => {
+      if (!metrics) throw new Error("\u6570\u636E\u56DE\u91C7\u672A\u542F\u7528");
+      return { metrics: await metrics.all() };
+    },
+    "metrics.refresh": async (_payload, signal) => {
+      signal.throwIfAborted();
+      if (!metrics) throw new Error("\u6570\u636E\u56DE\u91C7\u672A\u542F\u7528");
+      const xhs = new XhsAdapter({ baseUrl: config2().xhsBaseUrl, timeoutMs: config2().httpTimeoutMs, token: config2().xhsToken });
+      const bound = Object.entries(await metrics.all());
+      const failures = [];
+      for (const [key, note] of bound) {
+        const detail = await xhs.noteDetail(note.noteRef.noteId, note.noteRef.xsecToken);
+        if (detail.ok && detail.stats) await metrics.pushSnapshot(key, detail.stats);
+        else failures.push(`${note.noteRef.title}\uFF1A${detail.detail}`);
+      }
+      return { metrics: await metrics.all(), failures };
+    },
+    "notes.list": async (_payload, signal) => {
+      signal.throwIfAborted();
+      const xhs = new XhsAdapter({ baseUrl: config2().xhsBaseUrl, timeoutMs: config2().httpTimeoutMs, token: config2().xhsToken });
+      const listed = await xhs.userNotes();
+      if (!listed.ok) throw new Error(listed.detail);
+      return { notes: listed.notes.map((note) => ({ noteId: note.noteId, title: note.title, type: note.type })) };
+    },
+    "metrics.bind": async (payload, signal) => {
+      signal.throwIfAborted();
+      if (!metrics) throw new Error("\u6570\u636E\u56DE\u91C7\u672A\u542F\u7528");
+      const input = bindSchema.parse(payload);
+      const entry = await runtime.ledger.byPrepare(input.prepareId);
+      if (!entry) throw new Error("\u6CA1\u6709\u8FD9\u6761\u53D1\u5E03\u8BB0\u5F55");
+      const xhs = new XhsAdapter({ baseUrl: config2().xhsBaseUrl, timeoutMs: config2().httpTimeoutMs, token: config2().xhsToken });
+      const listed = await xhs.userNotes();
+      if (!listed.ok) throw new Error(listed.detail);
+      const note = listed.notes.find((candidate) => candidate.noteId === input.noteId);
+      if (!note) throw new Error("\u8BE5\u8D26\u53F7\u7B14\u8BB0\u5217\u8868\u91CC\u6CA1\u6709\u8FD9\u7BC7\u7B14\u8BB0\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+      await metrics.bind(entry.key, {
+        noteId: note.noteId,
+        xsecToken: note.xsecToken,
+        title: note.title,
+        boundAt: (/* @__PURE__ */ new Date()).toISOString(),
+        method: "manual"
+      });
+      return { key: entry.key };
+    },
+    "metrics.unbind": async (payload, signal) => {
+      signal.throwIfAborted();
+      if (!metrics) throw new Error("\u6570\u636E\u56DE\u91C7\u672A\u542F\u7528");
+      const input = prepareIdSchema.parse(payload);
+      const entry = await runtime.ledger.byPrepare(input.prepareId);
+      if (!entry) throw new Error("\u6CA1\u6709\u8FD9\u6761\u53D1\u5E03\u8BB0\u5F55");
+      await metrics.unbind(entry.key);
+      return { key: entry.key };
     }
   };
   for (const [endpoint, handle] of Object.entries(endpoints)) {
@@ -15315,7 +15532,7 @@ function mountPublishApi(ctx, runtime, config2, ledgerPath) {
     methods: ["POST"],
     requestBody: "streaming",
     fetch: (request) => {
-      const task = upload(request, config2().maxMediaBytes, join(dirname2(ledgerPath), "media"), AbortSignal.any([request.signal, lifetime.signal]));
+      const task = upload(request, config2().maxMediaBytes, join(dirname3(ledgerPath), "media"), AbortSignal.any([request.signal, lifetime.signal]));
       uploads.add(task);
       void task.then(() => uploads.delete(task), () => uploads.delete(task));
       return task;
@@ -15328,7 +15545,7 @@ async function upload(request, limit, directory, signal) {
   try {
     if (!request.body) throw new Error("\u6CA1\u6709\u6536\u5230\u5A92\u4F53\u6587\u4EF6");
     const name2 = basename(decodeURIComponent(request.headers.get("x-publish-name") ?? "media")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_");
-    await mkdir2(directory, { recursive: true });
+    await mkdir3(directory, { recursive: true });
     path = join(directory, randomUUID2() + "-" + name2);
     const file2 = await open(path, "wx");
     let size = 0;
@@ -15369,17 +15586,11 @@ async function apply(ctx, live) {
   const ledger = new Ledger(ledgerPath);
   await ledger.adoptLegacy(join2(homedir(), ".dsh", "publish", "ledger.json"));
   await ledger.reconcileOnStart();
-  const runtime = new PublishRuntime(ctx, ledger, resolved);
+  const metrics = new MetricsStore(join2(dirname4(ledgerPath), "metrics.json"));
+  const runtime = new PublishRuntime(ctx, ledger, resolved, metrics);
   ctx.jobs.attachController("publish-center");
   ctx.effect(() => () => runtime.dispose(), "publish: execution lifetime");
-  ctx.inject(["connection", "webServer"], (web) => {
-    try {
-      mountPublishApi(web, runtime, resolved, ledgerPath);
-    } catch (error51) {
-      console.error("[publish-diag] mount threw synchronously:", error51);
-      throw error51;
-    }
-  });
+  ctx.inject(["connection", "webServer"], (web) => mountPublishApi(web, runtime, resolved, ledgerPath, metrics));
   ctx.tools.register(defineTool({
     name: "publish_accounts",
     description: "\u5217\u51FA\u5DF2\u914D\u7F6E\u7684\u53D1\u5E03\u8D26\u53F7\uFF0C\u5E76\u53EF\u67E5\u4E0A\u6E38\u767B\u5F55\u6001\u3002\u53EA\u8BFB\uFF0C\u4E0D\u4F1A\u53D1\u5E03\u3002",

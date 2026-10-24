@@ -13,6 +13,7 @@ import { platformById, type PlatformSpec } from './platforms.ts'
 import { XhsAdapter } from './adapters/xhs.ts'
 import { SauAdapter } from './adapters/sau.ts'
 import { SAU, XHS } from './defaults.ts'
+import { matchByTitle, type MetricsStore } from './metrics.ts'
 import type { Config } from './config.ts'
 import type { PublishRequest, LedgerEntry, PrepareResult, PublishStatus } from './types.ts'
 declare module '@deepseek-ai/dsh-jobs/view' { interface JobKindMap { publish: 'publish' } }
@@ -28,7 +29,7 @@ export class PublishRuntime {
   private readonly accountQueues = new Map<string, Promise<unknown>>()
   private readonly lifetime = new AbortController()
   private admission: Promise<void> = Promise.resolve()
-  constructor(private readonly ctx: Context, readonly ledger: Ledger, private readonly config: () => Config) {}
+  constructor(private readonly ctx: Context, readonly ledger: Ledger, private readonly config: () => Config, private readonly metrics?: MetricsStore) {}
   async accounts(platform?: string) {
     const config = this.config()
     const xhs = new XhsAdapter({ baseUrl: config.xhsBaseUrl, timeoutMs: config.httpTimeoutMs, token: config.xhsToken })
@@ -88,7 +89,7 @@ export class PublishRuntime {
         abort.signal.throwIfAborted()
         const finalHashes = await Promise.all(entry.request.media.map(async file => (await hashFile(file)).hash))
         if (digestRequest(entry.request, finalHashes) !== entry.digest) throw new Error('排队期间媒体已变化，未提交')
-        return executePublish(entry, spec, xhs, sau, config, this.ledger, AbortSignal.any([this.lifetime.signal, abort.signal]))
+        return executePublish(entry, spec, xhs, sau, config, this.ledger, AbortSignal.any([this.lifetime.signal, abort.signal]), this.metrics)
       }
       let task: Promise<PublishOutcome> | undefined
       try {
@@ -231,6 +232,7 @@ async function executePublish(
   config: Config,
   ledger: Ledger,
   signal: AbortSignal,
+  metrics?: MetricsStore,
 ): Promise<PublishOutcome> {
   try {
     if (spec.adapter === 'xhs') {
@@ -248,6 +250,10 @@ async function executePublish(
         ? entry.request.scheduleAt === undefined ? 'submitted' : 'scheduled'
         : 'unknown'
       await ledger.update(entry.key, { status, detail: result.detail })
+      if (result.ok && entry.request.scheduleAt === undefined && metrics) {
+        // 匹配失败只影响数据回采，不影响发布结果；人工绑定兜底。
+        void autoMatch(entry, xhs, metrics).catch(() => { /* 数据回采的自动匹配失败留待人工绑定 */ })
+      }
       return { ok: result.ok, status, detail: result.detail }
     }
     if (!spec.sauName) throw new Error('该平台没有 sau 子命令')
@@ -275,4 +281,19 @@ async function executePublish(
     await ledger.update(entry.key, { status: 'unknown', detail, note: '提交结果未确认，请先核对平台记录' })
     return { ok: false, status: 'unknown', detail }
   }
+}
+
+/** 发布成功后按标题自动关联自己账号下的笔记；同题多篇宁缺不猜。 */
+async function autoMatch(entry: LedgerEntry, xhs: XhsAdapter, metrics: MetricsStore): Promise<void> {
+  const listed = await xhs.userNotes()
+  if (!listed.ok) return
+  const hit = matchByTitle(listed.notes, entry.request.title)
+  if (!hit) return
+  await metrics.bind(entry.key, {
+    noteId: hit.noteId,
+    xsecToken: hit.xsecToken,
+    title: hit.title,
+    boundAt: new Date().toISOString(),
+    method: 'auto',
+  })
 }

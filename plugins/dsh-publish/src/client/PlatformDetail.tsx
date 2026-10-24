@@ -1,11 +1,16 @@
-/** 平台详情：单平台的发布表单（按内容形态自适应）、记录与日历。 */
+/** 平台详情：单平台的发布表单（按内容形态自适应）、记录、日历与数据回采。 */
+import { useEffect } from 'react'
 import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { LedgerEntry } from '../types.ts'
 import type { FaceProps } from './common.tsx'
 import { Calendar, PlatformIcon, RecordRow, statusLabel } from './common.tsx'
 import { platformLabel } from './locales.ts'
 import { statusColor } from './order.ts'
 import type { PlatformSpec } from '../platforms.ts'
 import type { PageData } from './model.ts'
+
+/** 可以关联笔记做数据回采的状态：还没排期/没提交成功的不算。 */
+const BINDABLE:readonly string[]=['submitted','published','unknown']
 
 export function PlatformDetail({state,face,t,month,data}:FaceProps&{month:Date;data:PageData}){
  const platform=state.view.view==='platform'?state.view.platform:undefined
@@ -21,6 +26,9 @@ export function PlatformDetail({state,face,t,month,data}:FaceProps&{month:Date;d
   :<span className="chip c-ok">{t('valid')}</span>
  const platformEntries=data.entries.filter(e=>e.request.platform===platform)
  const legend=[...new Set(platformEntries.map(e=>e.status))].map(status=>({color:statusColor(status),label:statusLabel(status,t)}))
+ useEffect(()=>{
+  if(platform==='xiaohongshu'&&!spec.blocked)face.loadMetrics()
+ },[platform,spec.blocked,face])
  return <div className="publish-detail">
   <div className="publish-detail-head">
    <Button variant="outline" onClick={face.backHome}>{t('backToOverview')}</Button>
@@ -49,11 +57,68 @@ export function PlatformDetail({state,face,t,month,data}:FaceProps&{month:Date;d
     {records.length===0?<div className="publish-empty">{t('empty')}</div>:records.map(entry=><RecordRow key={entry.prepareId} entry={entry} t={t}/>)}
    </section>
    <div className="publish-side">
+    {platform==='xiaohongshu'&&!spec.blocked&&<DataCenter state={state} face={face} t={t} data={data}/>}
     <div className="publish-sidebox">
      <Calendar entries={platformEntries} colorFor={e=>statusColor(e.status)} onSelect={()=>{}} interactive={false} month={month} title={t('monthRhythm')} legend={legend} t={t}/>
     </div>
    </div>
   </div>
+ </div>
+}
+
+/** 数据中心：已发布记录 ↔ 平台笔记的关联与互动数据回采（上游无播放量，只有赞/藏/评/享）。 */
+function DataCenter({state,face,t,data}:{state:FaceProps['state'];face:FaceProps['face'];t:FaceProps['t'];data:PageData}){
+ const eligible=data.entries.filter(entry=>entry.request.platform==='xiaohongshu'&&BINDABLE.includes(entry.status))
+ const metricsOf=(entry:LedgerEntry)=>state.metrics?.[entry.key]
+ const bound=eligible.filter(entry=>metricsOf(entry)?.noteRef)
+ const unbound=eligible.filter(entry=>!metricsOf(entry)?.noteRef)
+ const totals={likes:0,collects:0,comments:0,shares:0}
+ for(const entry of bound){
+  const latest=metricsOf(entry)?.snapshots.at(-1)
+  totals.likes+=latest?.likes??0;totals.collects+=latest?.collects??0
+  totals.comments+=latest?.comments??0;totals.shares+=latest?.shares??0
+ }
+ return <div className="publish-sidebox">
+  <h3>{t('dataCenter')}<span className="chip c-muted">{t('xhsDataOnly')}</span></h3>
+  {eligible.length===0&&<p className="publish-na">{t('noData')}</p>}
+  {bound.length>0&&<div className="publish-tiles">
+   <div className="tile"><b>{totals.likes}</b><span>{t('likes')}</span></div>
+   <div className="tile"><b>{totals.collects}</b><span>{t('collects')}</span></div>
+   <div className="tile"><b>{totals.comments}</b><span>{t('comments')}</span></div>
+   <div className="tile"><b>{totals.shares}</b><span>{t('shares')}</span></div>
+  </div>}
+  {bound.map(entry=>{
+   const metrics=metricsOf(entry)!
+   const latest=metrics.snapshots.at(-1)
+   return <div className="publish-metric-row" key={entry.prepareId}>
+    <div className="publish-metric-main">
+     <strong>{metrics.noteRef.title}</strong>
+     <small>{metrics.noteRef.method==='auto'?t('autoMatched'):t('manualMatched')} · {latest?`${latest.likes??'—'} / ${latest.collects??'—'} / ${latest.comments??'—'} / ${latest.shares??'—'}`:t('noData')}</small>
+    </div>
+    <div className="publish-metric-acts">
+     <Button size="sm" variant="outline" onClick={face.refreshMetrics} disabled={state.busy}>{t('refreshData')}</Button>
+     <Button size="sm" variant="outline" onClick={()=>face.unbindNote(entry.prepareId)} disabled={state.busy}>{t('unbindNote')}</Button>
+    </div>
+   </div>})}
+  {unbound.map(entry=><div className="publish-metric-row" key={entry.prepareId}>
+   <div className="publish-metric-main">
+    <strong>{entry.request.title}</strong>
+    <small>{statusLabel(entry.status,t)}</small>
+   </div>
+   {state.bindTarget===entry.prepareId
+    ?<div className="publish-notes-picker">
+     {(state.notes??[]).map(note=><div className="publish-notes-row" key={note.noteId}>
+      <span className="t">{note.title}</span>
+      <Button size="sm" variant="outline" onClick={()=>face.bindNote(note.noteId)} disabled={state.busy}>{t('bindNote')}</Button>
+     </div>)}
+     {(state.notes?.length??0)===0&&<p className="publish-na">{t('noData')}</p>}
+     <Button size="sm" variant="outline" onClick={face.cancelBind} disabled={state.busy}>{t('back')}</Button>
+    </div>
+    :<div className="publish-metric-acts"><Button size="sm" variant="outline" onClick={()=>face.startBind(entry.prepareId)} disabled={state.busy}>{t('bindNote')}</Button></div>}
+  </div>)}
+  {eligible.length>0&&<div className="publish-refreshrow">
+   <Button variant="outline" onClick={face.refreshMetrics} disabled={state.busy}>{state.busy?t('checking'):t('refreshData')}</Button>
+  </div>}
  </div>
 }
 

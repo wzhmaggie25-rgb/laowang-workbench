@@ -7,3 +7,5 @@ export const requestSchema = z.object({
   visibility: z.string().optional(), isOriginal: z.boolean().optional(),
 })
 export const submitSchema = z.object({ prepareId: z.string(), token: z.string(), confirmed: z.literal(true) })
+export const prepareIdSchema = z.object({ prepareId: z.string().min(1) })
+export const bindSchema = z.object({ prepareId: z.string().min(1), noteId: z.string().min(1) })

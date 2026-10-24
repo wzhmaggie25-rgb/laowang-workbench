@@ -27,11 +27,41 @@ export interface XhsPublishResult {
   httpStatus: number
 }
 
+export interface XhsUserNote {
+  noteId: string
+  /** 详情接口必需；来自列表项，过期后需重新绑定。 */
+  xsecToken: string
+  title: string
+  type: string
+}
+
+export interface XhsNoteStats {
+  likes?: number
+  collects?: number
+  comments?: number
+  shares?: number
+}
+
+export interface XhsUserNoteResult {
+  ok: boolean
+  notes: XhsUserNote[]
+  detail: string
+}
+
+export interface XhsNoteDetailResult {
+  ok: boolean
+  stats?: XhsNoteStats
+  title?: string
+  postedAt?: string
+  detail: string
+}
+
 /**
  * xiaohongshu-mcp 的 HTTP 接口封装。
  * 文档：docs/API.md（Base URL http://localhost:18060）。
- * 注意：发布接口的响应**不含作品 id 或链接**，只有 "发布完成" 之类的状态文本，
- * 所以这里不伪造 id，核验只能后续用 feeds 接口反查（v0.1 未接）。
+ * 注意：发布接口的响应**不含作品 id 或链接**，只有 "发布完成" 之类的状态文本；
+ * 数据回采走 /api/v1/user/me（自己的笔记列表）与 /api/v1/feeds/detail（互动数据）。
+ * 上游没有播放量字段，统计只有点赞/收藏/评论/分享。
  */
 export class XhsAdapter {
   constructor(private readonly options: XhsOptions) {}
@@ -84,6 +114,67 @@ export class XhsAdapter {
     }
   }
 
+  /** 当前登录用户自己的笔记列表（/api/v1/user/me 的 data.feeds）。 */
+  async userNotes(): Promise<XhsUserNoteResult> {
+    try {
+      const result = await this.call('/api/v1/user/me')
+      const record = typeof result.json === 'object' && result.json !== null ? result.json as Record<string, unknown> : {}
+      const data = typeof record.data === 'object' && record.data !== null ? record.data as Record<string, unknown> : {}
+      const feeds = Array.isArray(data.feeds) ? data.feeds : []
+      const notes: XhsUserNote[] = []
+      for (const feed of feeds) {
+        if (typeof feed !== 'object' || feed === null) continue
+        const row = feed as Record<string, unknown>
+        const noteId = typeof row.id === 'string' ? row.id : undefined
+        const xsecToken = typeof row.xsecToken === 'string' ? row.xsecToken : undefined
+        const card = typeof row.noteCard === 'object' && row.noteCard !== null ? row.noteCard as Record<string, unknown> : {}
+        const title = typeof card.displayTitle === 'string' ? card.displayTitle : ''
+        const type = typeof card.type === 'string' ? card.type : ''
+        if (noteId && xsecToken) notes.push({ noteId, xsecToken, title, type })
+      }
+      if (result.status >= 300 || record.success !== true) {
+        return { ok: false, notes: [], detail: extractMessage(result.json) ?? result.text.slice(0, 200) }
+      }
+      return { ok: true, notes, detail: extractMessage(result.json) ?? 'ok' }
+    } catch (error) {
+      return { ok: false, notes: [], detail: `服务不可达：${(error as Error).message}` }
+    }
+  }
+
+  /** 单篇笔记的互动数据（/api/v1/feeds/detail 的 note.interactInfo）。 */
+  async noteDetail(noteId: string, xsecToken: string): Promise<XhsNoteDetailResult> {
+    try {
+      const result = await this.call('/api/v1/feeds/detail', {
+        method: 'POST',
+        body: JSON.stringify({ feed_id: noteId, xsec_token: xsecToken }),
+      })
+      const record = typeof result.json === 'object' && result.json !== null ? result.json as Record<string, unknown> : {}
+      const data = typeof record.data === 'object' && record.data !== null ? record.data as Record<string, unknown> : {}
+      const note = typeof data.note === 'object' && data.note !== null ? data.note as Record<string, unknown> : {}
+      const interact = typeof note.interactInfo === 'object' && note.interactInfo !== null ? note.interactInfo as Record<string, unknown> : {}
+      if (result.status >= 300 || record.success !== true) {
+        return { ok: false, detail: extractMessage(result.json) ?? result.text.slice(0, 200) }
+      }
+      const stats: XhsNoteStats = {
+        ...(parseCount(interact.likedCount) === undefined ? {} : { likes: parseCount(interact.likedCount) }),
+        ...(parseCount(interact.collectedCount) === undefined ? {} : { collects: parseCount(interact.collectedCount) }),
+        ...(parseCount(interact.commentCount) === undefined ? {} : { comments: parseCount(interact.commentCount) }),
+        ...(parseCount(interact.sharedCount) === undefined ? {} : { shares: parseCount(interact.sharedCount) }),
+      }
+      const time = typeof note.time === 'number' ? new Date(note.time).toISOString() : undefined
+      const title = typeof note.title === 'string' ? note.title : undefined
+      return {
+        ok: true,
+        stats,
+        ...(title === undefined ? {} : { title }),
+        ...(time === undefined ? {} : { postedAt: time }),
+        detail: extractMessage(result.json) ?? 'ok',
+      }
+    } catch (error) {
+      return { ok: false, detail: `服务不可达：${(error as Error).message}` }
+    }
+  }
+
   async publish(input: XhsPublishInput, signal?: AbortSignal): Promise<XhsPublishResult> {
     const path = input.kind === 'video' ? '/api/v1/publish_video' : '/api/v1/publish'
     const payload: Record<string, unknown> = {
@@ -110,6 +201,17 @@ function readSuccess(json: unknown): boolean {
   if (typeof json !== 'object' || json === null) return false
   const record = json as Record<string, unknown>
   return record.success === true
+}
+
+/** 上游数字可能是 12 / "1,234" / "1.2万" 这类网页格式；解析不了就保留 undefined。 */
+function parseCount(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string') return undefined
+  const text = value.trim().replace(/,/g, '')
+  if (/^\d+(\.\d+)?$/.test(text)) return Number(text)
+  const wan = text.match(/^(\d+(?:\.\d+)?)万$/)
+  if (wan) return Math.round(Number(wan[1]) * 10_000)
+  return undefined
 }
 
 function extractMessage(json: unknown): string | undefined {

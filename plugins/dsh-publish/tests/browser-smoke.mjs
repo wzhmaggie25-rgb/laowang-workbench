@@ -1,14 +1,16 @@
-/** Isolated real-host page acceptance for the platform-first IA; never logs in or publishes. */
+/** Isolated real-host page acceptance for the platform-first IA; mock engine only, never real. */
 import {createRequire} from 'node:module'
 import {readFile,writeFile} from 'node:fs/promises'
 import {resolve} from 'node:path'
 import assert from 'node:assert/strict'
+import {startMockXhs} from './mock-xhs.mjs'
 const source=process.env.DSH_SOURCE
 const require=createRequire(resolve(source,'package.json'))
 const {chromium}=require('playwright')
 const log=await readFile(process.env.PUBLISH_TEST_LOG,'utf8')
 const url=log.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=\S+/)?.[0]
 if(!url)throw new Error('Test Host is not ready')
+const mock=await startMockXhs(18106)
 const browser=await chromium.launch({headless:true,channel:'chrome'})
 const result=process.env.PUBLISH_TEST_DIR+'/browser-result.json'
 let page
@@ -111,16 +113,37 @@ try{
  // 全局日历：点今天 → 当日记录区出现（空台账显示空态）。
  await page.locator('.publish-cell.today').click()
  await page.locator('.publish-section', {hasText: '当日记录'}).waitFor()
+ // ===== 批次 2 闭环（mock 引擎）：页面发布 → 自动匹配 → 数据回采 =====
+ await page.locator('.publish-pcard[data-platform="xiaohongshu"]').getByRole('button',{name:/^(查看该平台|Open platform)$/}).click()
+ await page.locator('.publish-detail').waitFor()
+ await page.getByLabel('标题').fill('自动回采测试笔记')
+ const mediaPath=process.env.PUBLISH_TEST_DIR+'/e2e-image.png'
+ await writeFile(mediaPath,Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082','hex'))
+ await page.locator('.publish-upload input[type=file]').setInputFiles(mediaPath)
+ await poll(async()=>await page.locator('.publish-files li').count()===1,15000,'媒体上传完成')
+ await page.getByRole('button',{name:/^(预检并查看最终内容|Validate and review)$/}).click()
+ await page.getByRole('button',{name:/^(确认发布|Confirm publication)$/}).waitFor()
+ await page.getByRole('button',{name:/^(确认发布|Confirm publication)$/}).click()
+ // 提交成功 → 台账 submitted → 自动匹配按标题关联 mock 笔记（轮询期间反复刷新数据）。
+ await poll(async()=>{
+  await page.getByRole('button',{name:/^刷新数据$/}).first().click().catch(()=>{})
+  const rows=await page.locator('.publish-metric-row').allInnerTexts()
+  return rows.some(text=>text.includes('自动匹配'))
+ },25000,'发布后自动匹配笔记')
+ await poll(async()=>{
+  const tiles=await page.locator('.publish-tiles').innerText().catch(()=>'')
+  return ['12','3','5','1'].every(number=>tiles.includes(number))
+ },15000,'数据回采出互动数据 12/3/5/1')
  // 420px 窄窗不溢出。
  await page.setViewportSize({width:420,height:900})
  await page.getByRole('tab',{name:/^总览$|^Overview$/}).click()
  assert.ok(await page.locator('.publish-center').evaluate(el=>el.scrollWidth<=el.clientWidth+1))
  await page.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-mobile.png',fullPage:true})
  if(errors.length)throw new Error('页面或接口错误：'+errors.join('\n'))
- console.log('PASS: overview matrix, platform detail, sidebar toggle, account sync, drag reorder persistence, calendar filter, 420px overflow')
- await writeFile(result,JSON.stringify({passed:true,checks:['overview matrix order','platform detail via card','sidebar visibility persistence','account changes sync','drag reorder + reload persistence','calendar day filter','420px overflow'],pageErrors:errors},null,2)+'\n')
+ console.log('PASS: overview matrix, platform detail, sidebar toggle, account sync, drag reorder persistence, calendar filter, mock publish→auto-match→metrics loop, 420px overflow')
+ await writeFile(result,JSON.stringify({passed:true,checks:['overview matrix order','platform detail via card','sidebar visibility persistence','account changes sync','drag reorder + reload persistence','calendar day filter','mock publish closed loop with auto-match and metrics','420px overflow'],pageErrors:errors},null,2)+'\n')
 }catch(error){
  await page?.screenshot({path:process.env.PUBLISH_TEST_DIR+'/publish-failure.png',fullPage:true}).catch(()=>{})
  await writeFile(result,JSON.stringify({passed:false,failure:String(error&&error.stack||error)},null,2)+'\n').catch(()=>{})
  throw error
-}finally{await browser.close()}
+}finally{await browser.close();await mock.close()}

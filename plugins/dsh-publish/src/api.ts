@@ -4,9 +4,11 @@ import { mkdir, open, rm } from 'node:fs/promises'
 import { dirname, join, basename } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-connection'
-import { requestSchema, submitSchema } from './contract.ts'
+import { requestSchema, submitSchema, prepareIdSchema, bindSchema } from './contract.ts'
 import { PLATFORMS } from './platforms.ts'
 import type { PublishRuntime } from './runtime.ts'
+import type { MetricsStore } from './metrics.ts'
+import { XhsAdapter } from './adapters/xhs.ts'
 import type { Config } from './config.ts'
 
 /** One page-RPC endpoint: buffered JSON in, one JSON envelope out. */
@@ -24,7 +26,7 @@ interface PageEnvelope {
  * and the shared-channel composer admits only the owner principal, so no
  * endpoint accepts an unauthenticated or non-owner caller.
  */
-export function mountPublishApi(ctx: Context, runtime: PublishRuntime, config: () => Config, ledgerPath: string): void {
+export function mountPublishApi(ctx: Context, runtime: PublishRuntime, config: () => Config, ledgerPath: string, metrics?: MetricsStore): void {
  const tickets = new Map<string, { token: string; digest: string; expires: number }>()
  const lifetime = new AbortController()
  const uploads = new Set<Promise<Response>>()
@@ -49,6 +51,56 @@ export function mountPublishApi(ctx: Context, runtime: PublishRuntime, config: (
    if (!ticket || ticket.token !== input.token || ticket.expires < Date.now() || ticket.digest !== entry?.digest) throw new Error('确认已失效，请重新预检')
    tickets.delete(input.prepareId)
    return runtime.submit(input.prepareId, { signal, source: 'page', approve: async () => true })
+  },
+  'metrics.list': async () => {
+   if (!metrics) throw new Error('数据回采未启用')
+   return { metrics: await metrics.all() }
+  },
+  'metrics.refresh': async (_payload, signal) => {
+   signal.throwIfAborted()
+   if (!metrics) throw new Error('数据回采未启用')
+   const xhs = new XhsAdapter({ baseUrl: config().xhsBaseUrl, timeoutMs: config().httpTimeoutMs, token: config().xhsToken })
+   const bound = Object.entries(await metrics.all())
+   const failures: string[] = []
+   for (const [key, note] of bound) {
+    const detail = await xhs.noteDetail(note.noteRef.noteId, note.noteRef.xsecToken)
+    if (detail.ok && detail.stats) await metrics.pushSnapshot(key, detail.stats)
+    else failures.push(`${note.noteRef.title}：${detail.detail}`)
+   }
+   return { metrics: await metrics.all(), failures }
+  },
+  'notes.list': async (_payload, signal) => {
+   signal.throwIfAborted()
+   const xhs = new XhsAdapter({ baseUrl: config().xhsBaseUrl, timeoutMs: config().httpTimeoutMs, token: config().xhsToken })
+   const listed = await xhs.userNotes()
+   if (!listed.ok) throw new Error(listed.detail)
+   return { notes: listed.notes.map(note => ({ noteId: note.noteId, title: note.title, type: note.type })) }
+  },
+  'metrics.bind': async (payload, signal) => {
+   signal.throwIfAborted()
+   if (!metrics) throw new Error('数据回采未启用')
+   const input = bindSchema.parse(payload)
+   const entry = await runtime.ledger.byPrepare(input.prepareId)
+   if (!entry) throw new Error('没有这条发布记录')
+   const xhs = new XhsAdapter({ baseUrl: config().xhsBaseUrl, timeoutMs: config().httpTimeoutMs, token: config().xhsToken })
+   const listed = await xhs.userNotes()
+   if (!listed.ok) throw new Error(listed.detail)
+   const note = listed.notes.find(candidate => candidate.noteId === input.noteId)
+   if (!note) throw new Error('该账号笔记列表里没有这篇笔记，请刷新后重试')
+   await metrics.bind(entry.key, {
+    noteId: note.noteId, xsecToken: note.xsecToken, title: note.title,
+    boundAt: new Date().toISOString(), method: 'manual',
+   })
+   return { key: entry.key }
+  },
+  'metrics.unbind': async (payload, signal) => {
+   signal.throwIfAborted()
+   if (!metrics) throw new Error('数据回采未启用')
+   const input = prepareIdSchema.parse(payload)
+   const entry = await runtime.ledger.byPrepare(input.prepareId)
+   if (!entry) throw new Error('没有这条发布记录')
+   await metrics.unbind(entry.key)
+   return { key: entry.key }
   },
  }
  for (const [endpoint, handle] of Object.entries(endpoints)) {

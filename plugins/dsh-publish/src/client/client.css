@@ -103,3 +103,18 @@
 .publish-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
 @media(max-width:1000px){.publish-detail-cols{flex-direction:column}.publish-side{width:auto}}
 @media(max-width:520px){.publish-cards{grid-template-columns:1fr}.publish-statstrip{flex-wrap:wrap}.publish-stat{min-width:calc(50% - 6px)}}
+/* ===== v0.3 批次 2：数据中心 ===== */
+.publish-tiles{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:12px}
+.publish-tiles .tile{background:var(--dsw-alias-bg-base);border-radius:9px;padding:10px 12px}
+.publish-tiles .tile b{display:block;font-size:19px;font-weight:600}
+.publish-tiles .tile span{font-size:11px;color:var(--dsw-alias-label-secondary)}
+.publish-metric-row{display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:9px;background:var(--dsw-alias-bg-base);margin-bottom:7px;flex-wrap:wrap}
+.publish-metric-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.publish-metric-main strong{font-size:12.5px;font-weight:500;overflow-wrap:anywhere}
+.publish-metric-main small,.publish-metric-acts{font-size:11px;color:var(--dsw-alias-label-secondary)}
+.publish-metric-acts{display:flex;gap:6px;align-items:center}
+.publish-notes-picker{flex-basis:100%;display:flex;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l3);border-radius:9px;padding:8px}
+.publish-notes-row{display:flex;align-items:center;gap:8px;font-size:12px}
+.publish-notes-row .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.publish-refreshrow{margin-top:10px;display:flex;justify-content:flex-end}
+.publish-side .publish-sidebox+.publish-sidebox,.publish-side .publish-sidebox+.publish-cal{margin-top:14px}

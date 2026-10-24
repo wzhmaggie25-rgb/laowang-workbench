@@ -4,6 +4,7 @@ import { SettingsFormModel, settingsTextField, settingsNumberField, type Setting
 import type { Config } from '../config.ts'
 import type { PublishRequest, LedgerEntry, PrepareResult } from '../types.ts'
 import type { PlatformSpec } from '../platforms.ts'
+import type { NoteMetrics } from '../metrics-types.ts'
 import { moveCard } from './order.ts'
 export const textFields = ['xhsBaseUrl','xhsToken','sauBin','sauCwd','dailyTimeZone'] as const
 export const numberFields = ['approvalTimeoutSec','dailyLimit','httpTimeoutMs','publishTimeoutMs','maxMediaBytes'] as const
@@ -25,6 +26,12 @@ export interface PageState {
  view:PlatformView; tab:TabKey; detailAccount?:string; moreOpen:boolean; selectedDate?:string
  /** 拖拽中的预览顺序；undefined 表示跟随 data.homeCards。 */
  dragOrder?:string[]
+ /** 数据回采：按台账 key 的笔记关联与快照；仅小红书详情使用。 */
+ metrics?:Record<string,NoteMetrics>
+ /** 绑定候选笔记列表（来自 /api/v1/user/me）。 */
+ notes?:{noteId:string;title:string;type:string}[]
+ /** 正在为哪条记录（prepareId）挑选笔记。 */
+ bindTarget?:string
 }
  /** One instance feeds the main panel and the plugin settings page. */
 export class PublishController {
@@ -115,6 +122,30 @@ export class PublishController {
   const accepted=await this.writeHomeCards(snapshot.data.homeCards.filter(card=>card!==id))
   if(!accepted&&!this.abort.signal.aborted)this.state.update(s=>{s.error='卡片顺序保存未成功，请重试'})
  }
+ async loadMetrics():Promise<void>{await this.action(async()=>{
+  const result=await this.call<{metrics:Record<string,NoteMetrics>}>('metrics.list')
+  this.state.update(s=>{s.metrics=result.metrics})
+ })}
+ async refreshMetrics():Promise<void>{await this.action(async()=>{
+  const result=await this.call<{metrics:Record<string,NoteMetrics>;failures:string[]}>('metrics.refresh',{})
+  this.state.update(s=>{s.metrics=result.metrics;s.error=result.failures.length?result.failures.join('；'):undefined})
+ })}
+ async startBind(prepareId:string):Promise<void>{await this.action(async()=>{
+  const result=await this.call<{notes:{noteId:string;title:string;type:string}[]}>('notes.list',{})
+  this.state.update(s=>{s.notes=result.notes;s.bindTarget=prepareId})
+ })}
+ async bindNote(noteId:string):Promise<void>{await this.action(async()=>{
+  const target=this.state.getSnapshot().bindTarget
+  if(!target)throw new Error('没有待关联的记录')
+  await this.call('metrics.bind',{prepareId:target,noteId})
+  this.state.update(s=>{s.bindTarget=undefined;s.notes=undefined})
+  await this.loadMetrics()
+ })}
+ cancelBind():void{this.state.update(s=>{s.bindTarget=undefined;s.notes=undefined})}
+ async unbindNote(prepareId:string):Promise<void>{await this.action(async()=>{
+  await this.call('metrics.unbind',{prepareId})
+  await this.loadMetrics()
+ })}
  async action(work:()=>Promise<void>):Promise<void>{
   if(this.state.getSnapshot().busy)return
   this.state.update(s=>{s.busy=true;s.error=undefined})
@@ -140,7 +171,7 @@ export class PublishController {
   }
  })}
  remove(path:string):void{const item=this.state.getSnapshot().attachments.find(x=>x.path===path);if(item?.url)URL.revokeObjectURL(item.url);this.state.update(s=>{s.attachments=s.attachments.filter(x=>x.path!==path);s.draft.media=s.draft.media.filter(x=>x!==path);s.review=undefined})}
- face(){const {edit:editSettings,...actions}=this.form.actions();return {hooks:{publishState:this.state,publishSettings:this.settings},edit:(patch:Partial<PublishRequest>)=>this.edit(patch),openPlatform:(platform:string)=>this.openPlatform(platform),backHome:()=>this.backHome(),setTab:(tab:TabKey)=>this.setTab(tab),setDetailAccount:(account:string)=>this.setDetailAccount(account),toggleMore:()=>this.toggleMore(),selectDate:(key:string)=>this.selectDate(key),reorder:(dragId:string,targetId:string)=>this.reorder(dragId,targetId),commitOrder:()=>{void this.commitOrder()},cancelDrag:()=>this.cancelDrag(),addMore:(id:string)=>{void this.addMore(id)},removeMore:(id:string)=>{void this.removeMore(id)},refresh:()=>{void this.refresh()},check:()=>{void this.check()},prepare:()=>{void this.prepare()},submit:()=>{void this.submit()},upload:(files:FileList|null)=>{void this.upload(files)},remove:(path:string)=>this.remove(path),...actions,editSettings}}
+ face(){const {edit:editSettings,...actions}=this.form.actions();return {hooks:{publishState:this.state,publishSettings:this.settings},edit:(patch:Partial<PublishRequest>)=>this.edit(patch),openPlatform:(platform:string)=>this.openPlatform(platform),backHome:()=>this.backHome(),setTab:(tab:TabKey)=>this.setTab(tab),setDetailAccount:(account:string)=>this.setDetailAccount(account),toggleMore:()=>this.toggleMore(),selectDate:(key:string)=>this.selectDate(key),reorder:(dragId:string,targetId:string)=>this.reorder(dragId,targetId),commitOrder:()=>{void this.commitOrder()},cancelDrag:()=>this.cancelDrag(),addMore:(id:string)=>{void this.addMore(id)},removeMore:(id:string)=>{void this.removeMore(id)},loadMetrics:()=>{void this.loadMetrics()},refreshMetrics:()=>{void this.refreshMetrics()},startBind:(prepareId:string)=>{void this.startBind(prepareId)},bindNote:(noteId:string)=>{void this.bindNote(noteId)},cancelBind:()=>this.cancelBind(),unbindNote:(prepareId:string)=>{void this.unbindNote(prepareId)},refresh:()=>{void this.refresh()},check:()=>{void this.check()},prepare:()=>{void this.prepare()},submit:()=>{void this.submit()},upload:(files:FileList|null)=>{void this.upload(files)},remove:(path:string)=>this.remove(path),...actions,editSettings}}
  dispose():void{this.abort.abort();if(this.timer)clearTimeout(this.timer);this.form.dispose();for(const item of this.state.getSnapshot().attachments)if(item.url)URL.revokeObjectURL(item.url)}
 }
 function message(error:unknown):string{return error instanceof Error?error.message:String(error)}
