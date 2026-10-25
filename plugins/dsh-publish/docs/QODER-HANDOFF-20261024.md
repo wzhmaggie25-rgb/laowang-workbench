@@ -2,11 +2,13 @@
 项目: 老王工作台
 交接对象: Qoder
 日期: 2026-10-24
-状态: 页面与服务开发中；有阻塞，未通过端到端验收
+状态: **已取代（2026-10-25 老王裁定，任务叫停，不得据此开工）**；下文"页面与服务开发中"为历史状态
 代码位置: D:/AI/laowang-workbench-public/plugins/dsh-publish
 分支: codex/publish-center-ui
 基线提交: f1dec993bc1fc9394de63268ad27dc2778e19cd1
 ---
+
+> **【已取代 · 2026-10-25】** 老王裁定：发布中心改按《发布中心 DSH 插件搭建方案》（`D:/AI/老王工作台/分享输出/发布中心插件搭建方案.md`，Easel 人工审核发布插件 dsh-publish-center）执行。本交接包所涉 dsh-plugin-publish 整条开发线（v0.1–v0.4，含 codex/publish-center-ui 与全部 feat/* 分支、V03/V04 各计划文档）**停止推进，不得据此开工**。已安装的 dsh-plugin-publish 已于 2026-10-25 从正式桌面 profile 处置移除，详见 `D:/AI/老王工作台/分享输出/发布中心方向裁决与处置记录-20261025.md`。以下原文仅作历史保留。
 
 # 发布插件：方案、当前进度与 Qoder 后续任务
 
