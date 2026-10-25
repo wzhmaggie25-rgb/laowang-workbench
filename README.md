@@ -16,11 +16,9 @@ DeepSeek Harness源码部署是本仓库的第一个Skill，整理了本次实�
 
 | 插件 | 用来做什么 | 说明 |
 |---|---|---|
-| [dsh-plugin-publish](plugins/dsh-publish/README.md) | 一个插件管住所有平台发布：唯一发布入口、人工审批门禁、回执台账 | **v0.1骨架，未跑过真实发布**；上传交给[xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)和[social-auto-upload](https://github.com/dreammis/social-auto-upload)，插件只做编排 |
+| （暂无在架插件） | — | [dsh-plugin-publish](SUPERSEDED-20261025.md)已于2026-10-25下架：发布方向改按新方案 dsh-publish-center（人工审核发布）执行，旧自动发布线停止推进；历史代码见git记录与历史分支 |
 
-插件按Cordis协议写（`name`/`inject`/`apply`），注册4个工具：`publish_accounts`、`publish_prepare`、`publish_submit`、`publish_status`。加平台只加适配器，不加工具。
-
-安装、配置、停用和已知边界都写在插件自己的[README](plugins/dsh-publish/README.md)里；自己装、自己测。最短路径是一条命令，装完自动接线、不需要手动改profile：`dsh plugin --profile <profile> add github:wzhmaggie25-rgb/laowang-workbench#path:/plugins/dsh-publish`。想改源码直引调试也可以，插件目录放哪里都行，不需要塞进DSH源码仓库（已实测）。
+旧`dsh-plugin-publish`的方案、交接与验证记录随下架移除，完整历史保留在git记录与`codex/*`、`feat/*`分支中，取代裁定见[SUPERSEDED-20261025.md](SUPERSEDED-20261025.md)。
 
 ## 怎么用
 
@@ -38,13 +36,7 @@ DeepSeek Harness源码部署是本仓库的第一个Skill，整理了本次实�
 skills/
 └── deepseek-harness-source-install/
     └── SKILL.md
-plugins/
-└── dsh-publish/
-    ├── README.md
-    ├── src/
-    ├── scripts/
-    ├── tests/
-    └── cordis.patch.yml
+SUPERSEDED-20261025.md
 ```
 
 每个Skill的适用环境、固定版本、操作步骤和验收要求，写在各自的手册中。
